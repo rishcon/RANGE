@@ -1,0 +1,40 @@
+shot-rifle          Single 5.56mm AR-15 rifle gunshot, close perspective, sharp supersonic crack, punchy low-end body, short outdoor tail, dry, mono, 0.4s
+shot-sniper         Single bolt-action 7.62mm sniper rifle shot, very loud deep boom, heavy low end, long reverb tail across an open range, 1.5s
+shot-pistol         Single 9mm pistol gunshot, close-up, short dry crack with light metallic slide ring, minimal tail, 0.3s
+dry-fire            Handgun dry fire click, hammer striking empty chamber, tiny metallic snap, 0.1s
+mag-out             Rifle magazine release, metallic catch click and magazine sliding out of the magwell, 0.3s
+mag-in              Rifle magazine inserted and seated with a firm metallic clack, 0.3s
+mag-drop            Empty metal rifle magazine falling and bouncing on a concrete floor, 0.6s
+bolt-pull           Rifle charging handle pulled back, metal on metal slide, 0.3s
+bolt-release        Bolt carrier slamming forward, loud metallic clack, 0.2s
+ads-in              Soldier shouldering a rifle, quiet cloth and gear rustle, very short, 0.15s
+ads-out             Soldier lowering a rifle from the shoulder, quiet cloth rustle, very short, 0.15s
+shell-eject         Single brass rifle casing ejecting, tiny metallic ping, very short and quiet, 0.1s
+shell-drop          Single brass rifle shell casing bouncing on concrete, bright metallic tink with short ring, 0.5s
+impact-concrete     Bullet impact on a concrete wall, sharp crack with dust and debris, 0.4s
+impact-metal        Bullet ricochet off a steel plate, bright metallic clang with a whining ricochet, 0.6s
+impact-wood         Bullet impact on a wooden crate, dull splintering thud, 0.3s
+impact-dirt         Bullet impact in dry dirt and sand, muffled thump with scattering grit, 0.3s
+impact-flesh        Bullet impact on a dense foam ballistic dummy, dull heavy thud, no gore, 0.25s
+hitmarker           Very short clean UI hit confirmation tick, dry click, 0.05s
+hitmarker-head      Short bright UI headshot confirmation ding, higher pitched than a normal tick, 0.08s
+target-down         Short descending metallic chime confirming a target falling over, 0.3s
+footstep-walk       Single combat boot footstep on gravel and concrete, walking pace, 0.2s
+footstep-run        Single heavy running combat boot footstep on gravel with gear rattle, 0.25s
+footstep-crouch     Single very quiet crouched footstep on gravel, soft, 0.2s
+jump                Soldier pushing off into a jump, quiet cloth and gear rustle, 0.2s
+land                Soldier landing from a jump on gravel, heavy boot thud with gear rattle, 0.4s
+knife-swing         Fast knife slash through air, short sharp whoosh, 0.2s
+knife-swing-heavy   Heavy knife slash through air, deeper and longer whoosh, 0.3s
+knife-hit-flesh     Knife stabbing into a dense foam training dummy, dull thud, no gore, 0.25s
+knife-hit-hard      Knife blade striking concrete and metal, sharp scrape and clang, 0.3s
+pin-pull            Grenade safety pin pulled, small metallic click and spring, 0.25s
+throw               Soldier throwing a grenade, cloth whoosh of a swinging arm, 0.3s
+grenade-bounce      Metal grenade bouncing once on concrete, short hollow metallic tink, 0.2s
+explosion           Fragmentation grenade explosion outdoors, punchy low boom, sharp crack, debris, long open reverb tail, 2s
+smoke-pop           Smoke grenade igniting, muffled pop followed by long hissing gas release, 3s
+flashbang           Flashbang detonation, extremely loud sharp bang with deep low thump, 1.5s
+flash-ring          High pitched tinnitus ear ringing after an explosion, steady tone slowly fading, 4s
+weapon-switch       Short gear rustle and metallic clink of holstering a weapon, 0.3s
+weapon-draw         Short gear rustle and metallic clack of drawing and readying a weapon, 0.35s
+ui-click            Minimal dry UI click for a game menu, very short, 0.08s

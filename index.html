@@ -1,0 +1,794 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+    <title>RANGE — FPS prototype</title>
+    <style>
+      :root {
+        --accent: #ffb03a;
+        --accent-dim: #a8702099;
+        --bg: #0b0d10;
+        --panel: rgba(14, 17, 21, 0.92);
+        --line: rgba(255, 176, 58, 0.25);
+        --text: #d8dde3;
+        --text-dim: #8b949e;
+        --crosshair: #f2f5f7;
+      }
+
+      * { box-sizing: border-box; }
+
+      html, body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        overflow: hidden;
+        background: var(--bg);
+        color: var(--text);
+        font-family: "Segoe UI", "Inter", system-ui, -apple-system, sans-serif;
+        user-select: none;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      #render-canvas {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        display: block;
+        outline: none;
+        touch-action: none;
+      }
+
+      /* ---------------------------------------------------------------- HUD */
+
+      #hud {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity 160ms ease;
+        font-variant-numeric: tabular-nums;
+      }
+      #hud.visible { opacity: 1; }
+
+      /* crosshair */
+      #crosshair {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        width: 0;
+        height: 0;
+        --gap: 8px;
+        --len: 7px;
+        --thick: 2px;
+      }
+      #crosshair.hidden { display: none; }
+      #crosshair .ch-line {
+        position: absolute;
+        background: var(--crosshair);
+        box-shadow: 0 0 2px rgba(0, 0, 0, 0.9), 0 0 1px rgba(0, 0, 0, 1);
+      }
+      #crosshair .ch-line.v { width: var(--thick); height: var(--len); left: calc(var(--thick) / -2); }
+      #crosshair .ch-line.h { height: var(--thick); width: var(--len); top: calc(var(--thick) / -2); }
+      #crosshair .top { top: calc(-1 * (var(--gap) + var(--len))); }
+      #crosshair .bottom { top: var(--gap); }
+      #crosshair .left { left: calc(-1 * (var(--gap) + var(--len))); }
+      #crosshair .right { left: var(--gap); }
+      #crosshair .ch-dot {
+        position: absolute;
+        width: 2px;
+        height: 2px;
+        left: -1px;
+        top: -1px;
+        background: var(--crosshair);
+        opacity: 0.85;
+        box-shadow: 0 0 2px #000;
+      }
+
+      /* hit marker */
+      #hitmarker {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        width: 0;
+        height: 0;
+        opacity: 0;
+      }
+      #hitmarker .hm {
+        position: absolute;
+        width: 10px;
+        height: 2px;
+        background: #fff;
+        box-shadow: 0 0 3px #000;
+        transform-origin: 0 50%;
+      }
+      #hitmarker .hm.a { transform: rotate(45deg) translate(5px, -1px); }
+      #hitmarker .hm.b { transform: rotate(135deg) translate(5px, -1px); }
+      #hitmarker .hm.c { transform: rotate(225deg) translate(5px, -1px); }
+      #hitmarker .hm.d { transform: rotate(315deg) translate(5px, -1px); }
+      #hitmarker.show { animation: hm-pop 220ms ease-out; }
+      #hitmarker.kill .hm { background: #ff5a3c; }
+      #hitmarker.head .hm { background: #ffd24a; height: 3px; width: 13px; }
+      @keyframes hm-pop {
+        0% { opacity: 1; transform: scale(0.65); }
+        45% { opacity: 1; transform: scale(1.12); }
+        100% { opacity: 0; transform: scale(1.25); }
+      }
+
+      /* ammo block */
+      #ammo {
+        position: absolute;
+        right: 42px;
+        bottom: 34px;
+        text-align: right;
+        text-shadow: 0 2px 10px rgba(0, 0, 0, 0.85);
+      }
+      #weapon-name {
+        font-size: 11px;
+        letter-spacing: 3px;
+        color: var(--text-dim);
+        text-transform: uppercase;
+        margin-bottom: 2px;
+      }
+      #ammo-line { display: flex; align-items: baseline; justify-content: flex-end; gap: 8px; }
+      #ammo-mag { font-size: 54px; font-weight: 600; line-height: 0.95; letter-spacing: -1px; }
+      #ammo-mag.low { color: #ff6b4a; }
+      #ammo-sep { font-size: 22px; color: var(--text-dim); }
+      #ammo-reserve { font-size: 22px; color: var(--text-dim); font-weight: 500; }
+      #fire-mode { font-size: 11px; letter-spacing: 2px; color: var(--accent); margin-top: 3px; }
+
+      #reload-bar {
+        position: absolute;
+        left: 50%;
+        top: calc(50% + 56px);
+        transform: translateX(-50%);
+        width: 150px;
+        height: 3px;
+        background: rgba(255, 255, 255, 0.16);
+        opacity: 0;
+        transition: opacity 120ms;
+      }
+      #reload-bar.active { opacity: 1; }
+      #reload-fill { height: 100%; width: 0%; background: var(--accent); }
+      #reload-label {
+        position: absolute;
+        top: 8px;
+        left: 0;
+        width: 100%;
+        text-align: center;
+        font-size: 10px;
+        letter-spacing: 3px;
+        color: var(--text-dim);
+      }
+
+      #reload-prompt {
+        position: absolute;
+        left: 50%;
+        top: calc(50% + 86px);
+        transform: translateX(-50%);
+        font-size: 13px;
+        letter-spacing: 3px;
+        color: #ff6b4a;
+        opacity: 0;
+      }
+      #reload-prompt.show { animation: blink 1s steps(2, end) infinite; opacity: 1; }
+      @keyframes blink { 50% { opacity: 0.15; } }
+
+      /* stance / speed */
+      #status {
+        position: absolute;
+        left: 42px;
+        bottom: 34px;
+        display: flex;
+        gap: 18px;
+        align-items: flex-end;
+        text-shadow: 0 2px 10px rgba(0, 0, 0, 0.85);
+      }
+      .status-item { font-size: 11px; letter-spacing: 2px; color: #52606d; text-transform: uppercase; }
+      .status-item.on { color: var(--accent); }
+
+      /* stats */
+      #stats {
+        position: absolute;
+        right: 42px;
+        top: 30px;
+        text-align: right;
+        font-size: 12px;
+        line-height: 1.65;
+        color: var(--text-dim);
+        letter-spacing: 1px;
+      }
+      #stats b { color: var(--text); font-weight: 600; }
+
+      #fps {
+        position: absolute;
+        left: 42px;
+        top: 30px;
+        font-size: 12px;
+        color: var(--text-dim);
+        letter-spacing: 1px;
+      }
+      #fps.hidden { display: none; }
+
+      #hint {
+        position: absolute;
+        left: 50%;
+        bottom: 84px;
+        max-width: 44vw;
+        transform: translateX(-50%);
+        font-size: 11.5px;
+        letter-spacing: 1.4px;
+        color: #5a6570;
+        text-align: center;
+        line-height: 1.7;
+        transition: opacity 600ms ease;
+      }
+      #hint.faded { opacity: 0; }
+
+      /* оптический прицел */
+      #scope {
+        position: absolute;
+        inset: 0;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 90ms ease;
+      }
+      #scope.on { opacity: 1; }
+      #scope .mask {
+        position: absolute;
+        inset: 0;
+        background: radial-gradient(circle at 50% 50%, transparent 0 31vh, rgba(0, 0, 0, 0.97) 31.4vh);
+      }
+      #scope .ring {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        /* Всё в vh, чтобы внутренний край кольца точно совпал с вырезом маски. */
+        box-sizing: border-box;
+        width: 68vh;
+        height: 68vh;
+        margin: -34vh 0 0 -34vh;
+        border: 3vh solid #07080a;
+        border-radius: 50%;
+        box-shadow:
+          inset 0 0 8vh rgba(0, 0, 0, 0.65),
+          0 0 0 4px rgba(34, 36, 38, 0.95);
+      }
+      /* Сетка прицела рисуется в SVG ровно по размеру круга окуляра. */
+      #scope .reticle {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        width: 62vh;
+        height: 62vh;
+        margin: -31vh 0 0 -31vh;
+      }
+
+      /* марка коллиматора */
+      #reddot {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        width: 0;
+        height: 0;
+        opacity: 0;
+        transition: opacity 70ms ease;
+        pointer-events: none;
+      }
+      #reddot.on { opacity: 1; }
+      #reddot i {
+        position: absolute;
+        width: 7px;
+        height: 7px;
+        margin: -3.5px 0 0 -3.5px;
+        border-radius: 50%;
+        background: #ff2a18;
+        box-shadow:
+          0 0 6px 2px rgba(255, 42, 24, 0.75),
+          0 0 16px 6px rgba(255, 60, 20, 0.3);
+      }
+
+      /* дуэль: счёт, сообщение, здоровье */
+      #duel {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+      }
+      #duel.hidden { display: none; }
+      #duel-score {
+        position: absolute;
+        left: 50%;
+        top: 26px;
+        transform: translateX(-50%);
+        display: flex;
+        align-items: baseline;
+        gap: 14px;
+        font-size: 30px;
+        font-weight: 600;
+        letter-spacing: 2px;
+        text-shadow: 0 2px 12px rgba(0, 0, 0, 0.9);
+      }
+      #duel-score i { font-style: normal; font-size: 20px; color: #5a6570; }
+      #duel-you { color: var(--accent); }
+      #duel-bot { color: #ff6b4a; }
+      #duel-labels {
+        position: absolute;
+        left: 50%;
+        top: 62px;
+        transform: translateX(-50%);
+        display: flex;
+        gap: 30px;
+        font-size: 10px;
+        letter-spacing: 3px;
+        color: #5a6570;
+      }
+      #duel-message {
+        position: absolute;
+        left: 50%;
+        top: 34%;
+        transform: translateX(-50%);
+        font-size: 44px;
+        font-weight: 300;
+        letter-spacing: 10px;
+        color: #eef2f6;
+        text-shadow: 0 4px 20px rgba(0, 0, 0, 0.95);
+        white-space: nowrap;
+      }
+
+      #health {
+        position: absolute;
+        left: 42px;
+        bottom: 62px;
+        width: 210px;
+        text-shadow: 0 2px 10px rgba(0, 0, 0, 0.85);
+      }
+      #health.hidden { display: none; }
+      #health-bar {
+        height: 6px;
+        background: rgba(255, 255, 255, 0.13);
+        overflow: hidden;
+      }
+      #health-fill {
+        height: 100%;
+        width: 100%;
+        background: linear-gradient(90deg, #4caf50, #8bc34a);
+        transition: width 120ms linear, background 200ms;
+      }
+      #health.low #health-fill { background: linear-gradient(90deg, #d32f2f, #ff6b4a); }
+      #health-value {
+        margin-top: 5px;
+        font-size: 11px;
+        letter-spacing: 3px;
+        color: var(--text-dim);
+      }
+
+      /* красная засветка по краям при попадании */
+      #damage-vignette {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        opacity: 0;
+        background: radial-gradient(circle at 50% 50%, transparent 38%, rgba(180, 15, 15, 0.75) 95%);
+      }
+
+      /* ослепление светошумовой */
+      #flash {
+        position: absolute;
+        inset: 0;
+        background: #fff;
+        opacity: 0;
+        pointer-events: none;
+        /* Ослепление перекрывает и интерфейс — иначе эффект не читается. */
+        z-index: 5;
+      }
+
+      /* слоты оружия */
+      #weapon-slots {
+        position: absolute;
+        right: 42px;
+        bottom: 118px;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        gap: 3px;
+        text-shadow: 0 2px 10px rgba(0, 0, 0, 0.85);
+      }
+      .wslot {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        font-size: 11px;
+        letter-spacing: 2px;
+        color: #5a6570;
+        text-transform: uppercase;
+        padding: 2px 0 2px 8px;
+        border-right: 2px solid transparent;
+        transition: color 120ms, border-color 120ms;
+      }
+      .wslot .key {
+        min-width: 15px;
+        text-align: center;
+        font-size: 10px;
+        color: #39424c;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        padding: 0 3px;
+      }
+      .wslot .count { color: var(--accent); font-size: 11px; min-width: 14px; text-align: right; }
+      .wslot.active { color: #eef2f6; border-right-color: var(--accent); padding-right: 6px; }
+      .wslot.active .key { color: var(--accent); border-color: var(--accent-dim); }
+      .wslot.empty { opacity: 0.32; }
+
+      /* ADS vignette */
+      #ads-vignette {
+        position: absolute;
+        inset: 0;
+        background: radial-gradient(circle at 50% 50%, transparent 26%, rgba(0, 0, 0, 0.72) 62%);
+        opacity: 0;
+        pointer-events: none;
+      }
+
+      /* --------------------------------------------------------------- MENU */
+
+      #menu-root {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background:
+          radial-gradient(circle at 50% 40%, rgba(255, 176, 58, 0.07), transparent 55%),
+          linear-gradient(180deg, #05070a 0%, #0b0f14 55%, #05070a 100%);
+        z-index: 10;
+      }
+      #menu-root.hidden { display: none; }
+      #menu-root.translucent { background: rgba(4, 6, 9, 0.78); backdrop-filter: blur(6px); }
+
+      .panel { width: min(560px, 86vw); }
+      .panel.hidden { display: none; }
+
+      .brand { margin-bottom: 40px; }
+      .brand h1 {
+        margin: 0;
+        font-size: 46px;
+        letter-spacing: 12px;
+        font-weight: 300;
+        color: #eef2f6;
+      }
+      .brand h1 span { color: var(--accent); font-weight: 600; }
+      .brand .sub {
+        margin-top: 10px;
+        font-size: 11px;
+        letter-spacing: 4.5px;
+        color: #5a6570;
+        text-transform: uppercase;
+      }
+      .brand .rule {
+        margin-top: 18px;
+        height: 1px;
+        background: linear-gradient(90deg, var(--accent), transparent);
+      }
+
+      .menu-btn {
+        display: block;
+        width: 100%;
+        text-align: left;
+        padding: 15px 20px;
+        margin-bottom: 9px;
+        background: rgba(255, 255, 255, 0.02);
+        border: 1px solid rgba(255, 255, 255, 0.07);
+        border-left: 2px solid transparent;
+        color: var(--text);
+        font: inherit;
+        font-size: 14px;
+        letter-spacing: 3.5px;
+        text-transform: uppercase;
+        cursor: pointer;
+        transition: background 120ms ease, border-color 120ms ease, padding-left 120ms ease, color 120ms ease;
+      }
+      .menu-btn:hover, .menu-btn:focus-visible {
+        background: rgba(255, 176, 58, 0.09);
+        border-left-color: var(--accent);
+        padding-left: 26px;
+        color: #fff;
+        outline: none;
+      }
+      .menu-btn.danger:hover { background: rgba(255, 90, 60, 0.1); border-left-color: #ff5a3c; }
+
+      .panel-title {
+        font-size: 13px;
+        letter-spacing: 5px;
+        color: var(--accent);
+        text-transform: uppercase;
+        margin-bottom: 22px;
+        padding-bottom: 12px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .settings-scroll { max-height: 58vh; overflow-y: auto; padding-right: 8px; margin-bottom: 22px; }
+      .settings-scroll::-webkit-scrollbar { width: 5px; }
+      .settings-scroll::-webkit-scrollbar-thumb { background: var(--accent-dim); }
+
+      .set-row {
+        display: grid;
+        grid-template-columns: 1fr 150px 58px;
+        align-items: center;
+        gap: 14px;
+        padding: 11px 4px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.045);
+        font-size: 13px;
+      }
+      .set-row label { color: var(--text); letter-spacing: 0.6px; }
+      .set-row .val { text-align: right; color: var(--accent); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+      .set-row .desc { grid-column: 1 / -1; font-size: 11px; color: #5a6570; margin-top: -4px; }
+
+      input[type="range"] {
+        -webkit-appearance: none;
+        appearance: none;
+        width: 100%;
+        height: 2px;
+        background: rgba(255, 255, 255, 0.16);
+        outline: none;
+      }
+      input[type="range"]::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        width: 12px;
+        height: 12px;
+        background: var(--accent);
+        cursor: pointer;
+        border-radius: 0;
+        box-shadow: 0 0 8px rgba(255, 176, 58, 0.5);
+      }
+      input[type="checkbox"] {
+        appearance: none;
+        width: 34px;
+        height: 16px;
+        background: rgba(255, 255, 255, 0.1);
+        position: relative;
+        cursor: pointer;
+        transition: background 140ms;
+      }
+      input[type="checkbox"]::after {
+        content: "";
+        position: absolute;
+        width: 12px;
+        height: 12px;
+        top: 2px;
+        left: 2px;
+        background: #6b7681;
+        transition: transform 140ms, background 140ms;
+      }
+      input[type="checkbox"]:checked { background: rgba(255, 176, 58, 0.25); }
+      input[type="checkbox"]:checked::after { transform: translateX(18px); background: var(--accent); }
+
+      .row-actions { display: flex; gap: 10px; }
+      .row-actions .menu-btn { margin-bottom: 0; text-align: center; letter-spacing: 2.5px; }
+
+      .controls-grid {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 6px 26px;
+        font-size: 12px;
+        color: var(--text-dim);
+        margin-top: 6px;
+      }
+      .controls-grid .k {
+        display: inline-block;
+        min-width: 28px;
+        padding: 1px 6px;
+        margin-right: 8px;
+        text-align: center;
+        border: 1px solid rgba(255, 255, 255, 0.13);
+        color: var(--text);
+        font-size: 11px;
+      }
+
+      .foot { margin-top: 26px; font-size: 10.5px; letter-spacing: 2px; color: #39424c; }
+    </style>
+  </head>
+
+  <body>
+    <canvas id="render-canvas"></canvas>
+
+    <!-- ============================== HUD ============================== -->
+    <div id="hud">
+      <div id="ads-vignette"></div>
+      <div id="flash"></div>
+
+      <div id="crosshair">
+        <div class="ch-line v top"></div>
+        <div class="ch-line v bottom"></div>
+        <div class="ch-line h left"></div>
+        <div class="ch-line h right"></div>
+        <div class="ch-dot"></div>
+      </div>
+
+      <div id="hitmarker">
+        <div class="hm a"></div>
+        <div class="hm b"></div>
+        <div class="hm c"></div>
+        <div class="hm d"></div>
+      </div>
+
+      <div id="reload-bar">
+        <div id="reload-fill"></div>
+        <div id="reload-label">ПЕРЕЗАРЯДКА</div>
+      </div>
+      <div id="reload-prompt">R — ПЕРЕЗАРЯДКА</div>
+
+      <div id="scope">
+        <div class="mask"></div>
+        <div class="ring"></div>
+        <svg class="reticle" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg"></svg>
+      </div>
+
+      <div id="reddot"><i></i></div>
+
+      <div id="weapon-slots"></div>
+
+      <div id="damage-vignette"></div>
+
+      <div id="duel" class="hidden">
+        <div id="duel-score"><span id="duel-you">0</span><i>:</i><span id="duel-bot">0</span></div>
+        <div id="duel-labels"><span>ВЫ</span><span>БОТ</span></div>
+        <div id="duel-message"></div>
+      </div>
+
+      <div id="health" class="hidden">
+        <div id="health-bar"><div id="health-fill"></div></div>
+        <div id="health-value">100</div>
+      </div>
+
+      <div id="ammo">
+        <div id="weapon-name">AR-15 / 5.56×45</div>
+        <div id="ammo-line">
+          <span id="ammo-mag">30</span>
+          <span id="ammo-sep">/</span>
+          <span id="ammo-reserve">120</span>
+        </div>
+        <div id="fire-mode">АВТО</div>
+      </div>
+
+      <div id="status">
+        <div class="status-item" id="st-stance">СТОЯ</div>
+        <div class="status-item" id="st-sprint">БЕГ</div>
+        <div class="status-item" id="st-lean">НАКЛОН</div>
+      </div>
+
+      <div id="stats">
+        <div>ПОПАДАНИЯ <b id="st-hits">0</b></div>
+        <div>В ГОЛОВУ <b id="st-heads">0</b></div>
+        <div>ТОЧНОСТЬ <b id="st-acc">—</b></div>
+      </div>
+
+      <div id="fps">60 FPS</div>
+
+      <div id="hint">
+        WASD — движение · SHIFT — бег · CTRL — присед · ПРОБЕЛ — прыжок · Q/E — наклон · ЛКМ — огонь · ПКМ — прицел · R — перезарядка<br />
+        1 — основное (повторно: автомат ⇄ снайперка) · 2 — пистолет · 3 — нож · 4/5/6 — гранаты (ЛКМ бросок, ПКМ подкинуть) · X — предыдущее · ESC — пауза
+      </div>
+    </div>
+
+    <!-- ============================= МЕНЮ ============================== -->
+    <div id="menu-root">
+      <!-- главное меню -->
+      <div class="panel" id="menu-main">
+        <div class="brand">
+          <h1>RANGE<span>.</span></h1>
+          <div class="sub">Огневой полигон · прототип</div>
+          <div class="rule"></div>
+        </div>
+        <button class="menu-btn" id="btn-start">Полигон</button>
+        <button class="menu-btn" id="btn-duel">Дуэль 1 на 1</button>
+        <button class="menu-btn" id="btn-settings">Настройки</button>
+        <button class="menu-btn danger" id="btn-exit">Выход</button>
+        <div class="foot">TypeScript · Babylon.js · Electron</div>
+      </div>
+
+      <!-- пауза -->
+      <div class="panel hidden" id="menu-pause">
+        <div class="panel-title">Пауза</div>
+        <button class="menu-btn" id="btn-resume">Продолжить</button>
+        <button class="menu-btn" id="btn-pause-settings">Настройки</button>
+        <button class="menu-btn" id="btn-reset-range">Сбросить полигон</button>
+        <button class="menu-btn danger" id="btn-quit-menu">В главное меню</button>
+      </div>
+
+      <!-- настройки -->
+      <div class="panel hidden" id="menu-settings">
+        <div class="panel-title">Настройки</div>
+        <div class="settings-scroll">
+          <div class="set-row">
+            <label for="set-sens">Чувствительность мыши</label>
+            <input type="range" id="set-sens" min="0.2" max="6" step="0.05" />
+            <span class="val" id="val-sens">2.00</span>
+          </div>
+          <div class="set-row">
+            <label for="set-adssens">Множитель при прицеливании</label>
+            <input type="range" id="set-adssens" min="0.2" max="1.5" step="0.05" />
+            <span class="val" id="val-adssens">0.75</span>
+          </div>
+          <div class="set-row">
+            <label for="set-fov">Поле зрения (гориз.)</label>
+            <input type="range" id="set-fov" min="70" max="120" step="1" />
+            <span class="val" id="val-fov">95</span>
+          </div>
+          <div class="set-row">
+            <label for="set-volume">Громкость</label>
+            <input type="range" id="set-volume" min="0" max="1" step="0.01" />
+            <span class="val" id="val-volume">70%</span>
+          </div>
+          <div class="set-row">
+            <label for="set-invert">Инверсия оси Y</label>
+            <input type="checkbox" id="set-invert" />
+            <span class="val"></span>
+          </div>
+          <div class="set-row">
+            <label for="set-bob">Покачивание камеры</label>
+            <input type="checkbox" id="set-bob" />
+            <span class="val"></span>
+          </div>
+          <div class="set-row">
+            <label for="set-crosshair">Прицельная марка</label>
+            <input type="checkbox" id="set-crosshair" />
+            <span class="val"></span>
+          </div>
+          <div class="set-row">
+            <label for="set-shadows">Тени</label>
+            <input type="checkbox" id="set-shadows" />
+            <span class="val"></span>
+          </div>
+          <div class="set-row">
+            <label for="set-postfx">Постобработка (bloom, FXAA)</label>
+            <input type="checkbox" id="set-postfx" />
+            <span class="val"></span>
+          </div>
+          <div class="set-row">
+            <label for="set-fpsmeter">Счётчик FPS</label>
+            <input type="checkbox" id="set-fpsmeter" />
+            <span class="val"></span>
+          </div>
+          <div class="set-row">
+            <label for="set-fpslimit">Ограничение FPS</label>
+            <input type="range" id="set-fpslimit" min="0" max="8" step="1" />
+            <span class="val" id="val-fpslimit">Выкл</span>
+            <div class="desc">Ровный кадр важнее высокого FPS: при снятом лимите кадры идут неравномерно.</div>
+          </div>
+          <div class="set-row">
+            <label for="set-renderscale">Масштаб рендера</label>
+            <input type="range" id="set-renderscale" min="0.6" max="1" step="0.05" />
+            <span class="val" id="val-renderscale">100%</span>
+          </div>
+
+          <div class="panel-title" style="margin-top: 26px">Управление</div>
+          <div class="controls-grid">
+            <div><span class="k">W A S D</span>движение</div>
+            <div><span class="k">ЛКМ</span>огонь</div>
+            <div><span class="k">SHIFT</span>бег</div>
+            <div><span class="k">ПКМ</span>прицеливание</div>
+            <div><span class="k">CTRL</span>присед</div>
+            <div><span class="k">R</span>перезарядка</div>
+            <div><span class="k">ПРОБЕЛ</span>прыжок</div>
+            <div><span class="k">Q / E</span>наклон влево/вправо</div>
+            <div><span class="k">F</span>сброс мишеней</div>
+            <div><span class="k">ESC</span>пауза</div>
+            <div><span class="k">1</span>основное: автомат ⇄ снайперка</div>
+            <div><span class="k">2</span>пистолет</div>
+            <div><span class="k">3</span>нож (ЛКМ быстрый, ПКМ сильный)</div>
+            <div><span class="k">4</span>осколочная граната</div>
+            <div><span class="k">5</span>дымовая граната</div>
+            <div><span class="k">6</span>светошумовая граната</div>
+            <div><span class="k">X</span>предыдущее оружие</div>
+            <div><span class="k">ПКМ</span>прицел включается нажатием</div>
+          </div>
+        </div>
+        <div class="row-actions">
+          <button class="menu-btn" id="btn-settings-back">Назад</button>
+          <button class="menu-btn" id="btn-settings-reset">Сброс</button>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

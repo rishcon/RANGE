@@ -1,0 +1,28 @@
+{
+  "name": "range-shooter",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Realistic FPS prototype: shooting range, one rifle, dummies. TypeScript + Babylon.js + Electron.",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "build:web": "tsc -p tsconfig.json --noEmit && vite build",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "build": "npm run build:web && npm run build:electron",
+    "preview": "vite preview",
+    "dev:desktop": "concurrently -k -n VITE,ELECTRON -c cyan,magenta \"vite\" \"wait-on tcp:5173 && npm run build:electron && electron . --dev\"",
+    "start:desktop": "npm run build && electron .",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.electron.json --noEmit"
+  },
+  "dependencies": {
+    "@babylonjs/core": "^9.26.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "concurrently": "^9.1.0",
+    "electron": "^44.3.0",
+    "typescript": "^5.7.0",
+    "vite": "^8.3.0",
+    "wait-on": "^8.0.0"
+  }
+}
