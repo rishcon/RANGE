@@ -25,6 +25,8 @@ export interface HudState {
   reloadProgress: number;
   /** Полуугол разброса, градусы. */
   spreadDeg: number;
+  /** Нагрев ствола 0..1 — марка краснеет по мере разогрева. */
+  barrelHeat: number;
   /** Вертикальный FOV камеры, радианы — нужен для перевода разброса в пиксели. */
   fovV: number;
   adsT: number;
@@ -230,6 +232,13 @@ export class HUD {
 
     this.crosshair.style.setProperty("--gap", `${gap.toFixed(1)}px`);
     this.crosshair.style.setProperty("--len", `${clamp(5 + gap * 0.08, 5, 14).toFixed(1)}px`);
+
+    // Разогретый ствол подкрашивает марку: рост отдачи иначе ничем не виден.
+    const heat = clamp(state.barrelHeat, 0, 1);
+    const g = Math.round(245 - 105 * heat);
+    const b = Math.round(247 - 180 * heat);
+    this.crosshair.style.setProperty("--crosshair", `rgb(242,${g},${b})`);
+
     this.crosshair.classList.toggle("hidden", !state.showCrosshair);
   }
 

@@ -15,7 +15,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.electron.json --noEmit"
   },
   "dependencies": {
-    "@babylonjs/core": "^9.26.0"
+    "@babylonjs/core": "^9.26.0",
+    "@babylonjs/loaders": "9.26.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

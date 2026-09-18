@@ -1,4 +1,8 @@
-import { Color3, Mesh, MeshBuilder, Scene, StandardMaterial, TransformNode, Vector3 } from "@babylonjs/core";
+import { Color3, Mesh, MeshBuilder, Scene, StandardMaterial, TransformNode, Vector3, type AssetContainer } from "@babylonjs/core";
+import { buildClassicM4 } from "./ClassicM4";
+import { buildG18 } from "./G18";
+import { buildImportedSniper, buildBayonet } from "./ImportedArsenal";
+import { buildTacticalHands } from "./TacticalHands";
 
 /** Слой рендера вьюмодели: очищает буфер глубины, поэтому ствол не режется стенами. */
 export const VIEWMODEL_LAYER = 1;
@@ -29,6 +33,10 @@ export interface HandAnchor {
 }
 
 export interface HandSetup {
+  /** Держать оружие ригой рук из GLB вместо процедурных кистей. */
+  rig?: boolean;
+  style?: "tactical";
+  grip?: "horizontal";
   right: HandAnchor | null;
   rightForearm: HandAnchor | null;
   left: HandAnchor | null;
@@ -44,7 +52,24 @@ export interface WeaponModel {
   ejectPort: TransformNode;
   magazine: Mesh | null;
   bolt: Mesh | null;
+  /** Bolt-action handle centre, relative to the bolt's mechanical pivot. */
+  manualBolt?: { handle: Vector3; travel: number; liftAngle: number };
+  /** Separate charging handle, when supplied by an imported model. */
+  chargingHandle?: Mesh;
   hands: HandSetup;
+  /**
+   * Центр прицельной марки в координатах геометрии (до масштаба `body`). По
+   * нему прицеливание каждый кадр доводит ригу так, чтобы марка легла ровно в
+   * центр кадра — подбирать позу прицеливания руками больше не нужно.
+   */
+  sight?: Vector3;
+  /**
+   * Куда вывести оружие на бедре — точка в метрах от глаза. По умолчанию это
+   * `HIP_SIGHT`, подобранная под винтовку: она сама закрывает собой предплечья.
+   * Мелкие стволы их не закрывают, поэтому их держат дальше и ниже — иначе в
+   * кадре видны одни руки поперёк экрана.
+   */
+  hipTarget?: Vector3;
   /** Прятать модель при полном прицеливании (оптический прицел). */
   hideOnAds: boolean;
 }
@@ -55,7 +80,8 @@ export type WeaponModelKind = "rifle" | "sniper" | "pistol" | "knife" | "frag" |
 export class ModelFactory {
   private readonly mats = new Map<string, StandardMaterial>();
 
-  constructor(private readonly scene: Scene) {}
+  constructor(private readonly scene: Scene, readonly rifleAsset: AssetContainer, readonly pistolAsset: AssetContainer,
+    readonly sniperAsset: AssetContainer, readonly knifeAsset: AssetContainer) {}
 
   material(name: string, color: Color3, specular: number, power: number): StandardMaterial {
     const cached = this.mats.get(name);
@@ -174,240 +200,20 @@ function makeBody(scene: Scene, root: TransformNode, forward: number): Transform
 // ---------------------------------------------------------------- штурмовая
 
 function buildRifle(scene: Scene, root: TransformNode, f: ModelFactory): WeaponModel {
-  const body = makeBody(scene, root, 0.34);
-  const b = new Builder(scene, body);
-  /** Линия прицела = центр линзы коллиматора. */
-  const sight = 0.105;
-
-  b.add(b.box("lower", 0.05, 0.072, 0.24), f.polymer, 0, 0.006, 0.06);
-  b.add(b.box("upper", 0.048, 0.048, 0.3), f.metal, 0, 0.043, 0.1);
-  b.add(b.box("handguard", 0.052, 0.052, 0.25), f.polymer, 0, 0.041, 0.31);
-
-  const barrel = b.cyl("barrel", 0.0165, 0.3);
-  barrel.rotation.x = Math.PI / 2;
-  b.add(barrel, f.steel, 0, 0.041, 0.5);
-  const brake = b.cyl("brake", 0.027, 0.055);
-  brake.rotation.x = Math.PI / 2;
-  b.add(brake, f.steel, 0, 0.041, 0.63);
-  b.add(b.box("gas", 0.024, 0.03, 0.05), f.steel, 0, 0.062, 0.45);
-
-  const tube = b.cyl("tube", 0.032, 0.16);
-  tube.rotation.x = Math.PI / 2;
-  b.add(tube, f.metal, 0, 0.028, -0.12);
-  b.add(b.box("stock", 0.042, 0.062, 0.16), f.polymer, 0, 0.012, -0.16);
-  b.add(b.box("butt", 0.046, 0.085, 0.026), f.polymer, 0, 0.002, -0.245);
-
-  const grip = b.box("grip", 0.032, 0.115, 0.05);
-  grip.rotation.x = -0.32;
-  b.add(grip, f.polymer, 0, -0.075, -0.025);
-
-  const magazine = b.box("magazine", 0.028, 0.17, 0.07);
-  magazine.rotation.x = 0.16;
-  b.add(magazine, f.polymer, 0, -0.095, 0.075);
-
-  const bolt = b.add(b.box("bolt", 0.044, 0.018, 0.055), f.steel, 0, 0.07, -0.02);
-
-  // Коллиматор на планке: открытая рамка и полупрозрачная линза.
-  // Марку рисует HUD — так точка всегда ровно в центре экрана.
-  b.add(b.box("optic-mount", 0.032, 0.028, 0.08), f.metal, 0, 0.075, 0.115);
-  b.add(b.box("optic-bottom", 0.052, 0.007, 0.076), f.metal, 0, sight - 0.028, 0.115);
-  b.add(b.box("optic-top", 0.052, 0.009, 0.076), f.metal, 0, sight + 0.03, 0.115);
-  for (const dx of [-0.024, 0.024]) {
-    b.add(b.box("optic-side", 0.006, 0.062, 0.076), f.metal, dx, sight, 0.115);
-  }
-  b.add(b.box("optic-hood", 0.052, 0.014, 0.012), f.metal, 0, sight + 0.024, 0.158);
-  b.add(b.box("optic-lens", 0.044, 0.05, 0.003), f.lens, 0, sight, 0.148);
-  // Складная мушка на газблоке — просто деталь силуэта.
-  b.add(b.box("front-post", 0.004, 0.016, 0.005), f.metal, 0, 0.084, 0.545);
-
-  return {
-    body,
-    meshes: b.meshes,
-    muzzle: b.node("muzzle", 0, 0.041, 0.665),
-    ejectPort: b.node("eject", 0.035, 0.055, 0.02),
-    magazine,
-    bolt,
-    hideOnAds: false,
-    poses: {
-      hip: pose(0.125, -0.132, 0.175, 0.015, -0.05, 0.035),
-      ads: pose(0, -sight * VM_SCALE, 0.02, 0, 0, 0),
-      sprint: pose(0.145, -0.17, 0.15, 0.05, 0.55, 0.32),
-      reload: pose(0.06, -0.108, 0.15, -0.05, -0.42, -0.3),
-    },
-    hands: {
-      right: anchor(0.004, -0.072, -0.026, -0.32, 0, 0),
-      rightForearm: anchor(0.028, -0.115, -0.022, 0.55, -0.1, 0.6),
-      left: anchor(0, 0.03, 0.315, 0.12, 0, 0),
-      leftForearm: anchor(-0.036, -0.025, 0.265, 0.5, 0.15, -0.65),
-    },
-  };
+  return buildClassicM4(scene, root, f.rifleAsset);
 }
 
 // --------------------------------------------------------------- снайперская
 
-function buildSniper(scene: Scene, root: TransformNode, f: ModelFactory): WeaponModel {
-  const body = makeBody(scene, root, 0.33);
-  const b = new Builder(scene, body);
-  /** Центр оптики — по нему выставляется поза прицеливания. */
-  const optic = 0.125;
-
-  b.add(b.box("receiver", 0.055, 0.08, 0.34), f.metal, 0, 0.02, 0.06);
-  b.add(b.box("chassis", 0.06, 0.05, 0.2), f.olive, 0, -0.03, 0.16);
-
-  const barrel = b.cyl("barrel", 0.026, 0.52, 14);
-  barrel.rotation.x = Math.PI / 2;
-  b.add(barrel, f.steel, 0, 0.028, 0.5);
-  const brake = b.cyl("brake", 0.038, 0.08, 14);
-  brake.rotation.x = Math.PI / 2;
-  b.add(brake, f.steel, 0, 0.028, 0.79);
-
-  // Приклад с щекой — характерный силуэт снайперской винтовки.
-  b.add(b.box("stock", 0.05, 0.085, 0.3), f.olive, 0, -0.01, -0.25);
-  b.add(b.box("cheek", 0.05, 0.045, 0.17), f.olive, 0, 0.055, -0.21);
-  b.add(b.box("butt", 0.055, 0.12, 0.03), f.polymer, 0, -0.02, -0.41);
-
-  const grip = b.box("grip", 0.034, 0.12, 0.055);
-  grip.rotation.x = -0.3;
-  b.add(grip, f.polymer, 0, -0.085, -0.055);
-
-  const magazine = b.box("magazine", 0.032, 0.095, 0.09);
-  b.add(magazine, f.metal, 0, -0.075, 0.11);
-
-  // Оптика: труба, окуляр, объектив и кольца крепления.
-  const scope = b.cyl("scope", 0.05, 0.3, 16);
-  scope.rotation.x = Math.PI / 2;
-  b.add(scope, f.metal, 0, optic, 0.13);
-  const ocular = b.cyl("ocular", 0.068, 0.05, 16);
-  ocular.rotation.x = Math.PI / 2;
-  b.add(ocular, f.metal, 0, optic, -0.04);
-  const objective = b.cyl("objective", 0.074, 0.055, 16);
-  objective.rotation.x = Math.PI / 2;
-  b.add(objective, f.metal, 0, optic, 0.3);
-  const lens = b.cyl("lens", 0.064, 0.006, 16);
-  lens.rotation.x = Math.PI / 2;
-  b.add(lens, f.glass, 0, optic, 0.327);
-  for (const z of [0.02, 0.24]) {
-    b.add(b.box("ring", 0.03, 0.055, 0.022), f.metal, 0, optic - 0.04, z);
-  }
-
-  // Рукоятка затвора справа.
-  const boltStem = b.cyl("bolt", 0.013, 0.07, 10);
-  boltStem.rotation.z = Math.PI / 2;
-  const bolt = b.add(boltStem, f.steel, 0.045, 0.035, -0.03);
-  const knob = MeshBuilder.CreateSphere("bolt-knob", { diameter: 0.024, segments: 8 }, scene);
-  b.add(knob, f.steel, 0.082, 0.035, -0.03);
-
-  return {
-    body,
-    meshes: b.meshes,
-    muzzle: b.node("muzzle", 0, 0.028, 0.84),
-    ejectPort: b.node("eject", 0.04, 0.045, 0.0),
-    magazine,
-    bolt,
-    hideOnAds: true,
-    poses: {
-      hip: pose(0.12, -0.15, 0.14, 0.015, -0.045, 0.03),
-      ads: pose(0, -optic * VM_SCALE, 0.0, 0, 0, 0),
-      sprint: pose(0.135, -0.16, 0.14, 0.06, 0.55, 0.32),
-      reload: pose(0.06, -0.12, 0.12, -0.05, -0.42, -0.3),
-    },
-    hands: {
-      right: anchor(0.004, -0.082, -0.058, -0.3, 0, 0),
-      rightForearm: anchor(0.03, -0.125, -0.055, 0.55, -0.1, 0.6),
-      left: anchor(0, -0.03, 0.29, 0.12, 0, 0),
-      leftForearm: anchor(-0.038, -0.07, 0.24, 0.5, 0.15, -0.65),
-    },
-  };
-}
 
 // ------------------------------------------------------------------ пистолет
 
 function buildPistol(scene: Scene, root: TransformNode, f: ModelFactory): WeaponModel {
-  const body = makeBody(scene, root, 0.3);
-  const b = new Builder(scene, body);
-  const sight = 0.055;
-
-  const slide = b.add(b.box("slide", 0.034, 0.044, 0.2), f.metal, 0, 0.03, 0.06);
-  b.add(b.box("frame", 0.032, 0.03, 0.16), f.polymer, 0, -0.002, 0.05);
-  b.add(b.box("dust-cover", 0.03, 0.02, 0.08), f.polymer, 0, -0.006, 0.11);
-
-  const grip = b.box("grip", 0.034, 0.12, 0.05);
-  grip.rotation.x = -0.16;
-  b.add(grip, f.polymer, 0, -0.075, -0.024);
-  const magazine = b.box("magazine", 0.03, 0.11, 0.044);
-  magazine.rotation.x = -0.16;
-  b.add(magazine, f.metal, 0, -0.078, -0.022);
-
-  b.add(b.box("guard-front", 0.02, 0.012, 0.026), f.polymer, 0, -0.038, 0.032);
-  b.add(b.box("guard-side", 0.02, 0.03, 0.01), f.polymer, 0, -0.028, 0.045);
-  b.add(b.box("trigger", 0.008, 0.026, 0.01), f.steel, 0, -0.028, 0.015);
-
-  b.add(b.box("rear-sight", 0.03, 0.011, 0.012), f.steel, 0, sight, -0.024);
-  b.add(b.box("front-sight", 0.006, 0.012, 0.008), f.steel, 0, sight, 0.152);
-
-  return {
-    body,
-    meshes: b.meshes,
-    muzzle: b.node("muzzle", 0, 0.03, 0.165),
-    ejectPort: b.node("eject", 0.022, 0.042, 0.03),
-    magazine,
-    bolt: slide,
-    hideOnAds: false,
-    poses: {
-      hip: pose(0.125, -0.125, 0.2, 0.02, -0.06, 0.04),
-      ads: pose(0, -sight * VM_SCALE, 0.1, 0, 0, 0),
-      sprint: pose(0.14, -0.17, 0.16, 0.08, 0.5, 0.3),
-      reload: pose(0.07, -0.14, 0.13, -0.05, -0.4, -0.28),
-    },
-    hands: {
-      // Пистолет держат двумя руками: левая обхватывает правую снизу-слева.
-      right: anchor(0.004, -0.074, -0.022, -0.16, 0, 0),
-      rightForearm: anchor(0.026, -0.12, -0.02, 0.6, -0.08, 0.5),
-      left: anchor(-0.036, -0.086, -0.008, -0.16, 0, 0.34),
-      leftForearm: anchor(-0.054, -0.125, -0.006, 0.58, 0.12, -0.5),
-    },
-  };
+  return buildG18(scene, root, f.pistolAsset);
 }
 
 // ----------------------------------------------------------------------- нож
 
-function buildKnife(scene: Scene, root: TransformNode, f: ModelFactory): WeaponModel {
-  const body = makeBody(scene, root, 0.26);
-  const b = new Builder(scene, body);
-
-  b.add(b.box("blade", 0.009, 0.036, 0.19), f.blade, 0, 0.022, 0.15);
-  // Скос к острию.
-  const tip = b.box("blade-tip", 0.009, 0.036, 0.05);
-  tip.rotation.x = 0.42;
-  b.add(tip, f.blade, 0, 0.014, 0.265);
-  b.add(b.box("edge", 0.011, 0.008, 0.17), f.steel, 0, 0.006, 0.14);
-  b.add(b.box("guard", 0.034, 0.014, 0.022), f.metal, 0, 0.012, 0.045);
-  b.add(b.box("handle", 0.028, 0.034, 0.12), f.polymer, 0, 0.004, -0.03);
-  b.add(b.box("pommel", 0.032, 0.038, 0.022), f.metal, 0, 0.004, -0.102);
-
-  return {
-    body,
-    meshes: b.meshes,
-    muzzle: b.node("tip", 0, 0.02, 0.29),
-    ejectPort: b.node("eject", 0, 0, 0),
-    magazine: null,
-    bolt: null,
-    hideOnAds: false,
-    poses: {
-      // "Прицеливание" у ножа — замах для сильного удара.
-      hip: pose(0.125, -0.095, 0.28, -0.05, -0.38, 0.3),
-      ads: pose(0.155, -0.02, 0.22, -0.6, -0.72, 0.5),
-      sprint: pose(0.155, -0.15, 0.22, 0.1, 0.5, 0.35),
-      reload: pose(0.125, -0.095, 0.28, -0.05, -0.38, 0.3),
-    },
-    hands: {
-      right: anchor(0.004, -0.008, -0.05, -0.05, 0, 0),
-      rightForearm: anchor(0.024, -0.055, -0.075, 0.55, -0.1, 0.55),
-      left: null,
-      leftForearm: null,
-    },
-  };
-}
 
 // ------------------------------------------------------------------ гранаты
 
@@ -450,14 +256,17 @@ function buildGrenade(scene: Scene, root: TransformNode, f: ModelFactory, kind: 
     magazine: null,
     bolt: null,
     hideOnAds: false,
+    // Позы пересчитаны относительно хвата риги: место в кадре задаёт она.
     poses: {
-      hip: pose(0.125, -0.125, 0.25, 0.1, -0.2, 0.1),
+      hip: pose(0, 0, 0, 0, 0, 0),
       // "Прицеливание" — замах у плеча перед броском.
-      ads: pose(0.16, -0.02, 0.15, -0.55, -0.35, 0.2),
-      sprint: pose(0.16, -0.19, 0.2, 0.25, 0.5, 0.3),
-      reload: pose(0.13, -0.15, 0.24, 0.18, -0.2, 0.1),
+      ads: pose(0.035, 0.105, -0.1, -0.65, -0.15, 0.1),
+      sprint: pose(0.035, -0.065, -0.05, 0.15, 0.7, 0.2),
+      reload: pose(0.005, -0.025, -0.01, 0.08, 0, 0),
     },
+    hipTarget: new Vector3(0.05, -0.1, 0.46),
     hands: {
+      rig: true,
       right: anchor(0.002, -0.03, -0.03, -0.1, 0, 0),
       rightForearm: anchor(0.024, -0.08, -0.05, 0.55, -0.1, 0.55),
       left: null,
@@ -477,11 +286,11 @@ export function createWeaponModel(
     case "rifle":
       return buildRifle(scene, root, factory);
     case "sniper":
-      return buildSniper(scene, root, factory);
+      return buildImportedSniper(scene, root, factory.sniperAsset);
     case "pistol":
       return buildPistol(scene, root, factory);
     case "knife":
-      return buildKnife(scene, root, factory);
+      return buildBayonet(scene, root, factory.knifeAsset);
     default:
       return buildGrenade(scene, root, factory, kind);
   }
@@ -499,6 +308,7 @@ export function buildHands(
   leftArm: TransformNode,
   rightArm: TransformNode
 ): Mesh[] {
+  if (hands.style === "tactical") return buildTacticalHands(scene, f, hands, leftArm, rightArm);
   const meshes: Mesh[] = [];
   const glove = f.glove;
   const sleeve = f.sleeve;

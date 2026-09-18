@@ -12,6 +12,8 @@ import {
 } from "@babylonjs/core";
 import { clamp01, damp, lerp, randRange, smoothstep, spring } from "../core/MathUtil";
 import type { TextureLibrary } from "../world/Textures";
+import { sampleBoltCycle } from "./BoltCycle";
+import type { FpsArms } from "./FpsArms";
 import {
   buildHands,
   createWeaponModel,
@@ -35,6 +37,8 @@ export interface ViewModelContext {
   reloadEmpty: boolean;
   /** 0 — оружие убрано, 1 — в руках. */
   equipT: number;
+  /** Undefined when idle; 0..1 is the firearm's manual bolt-action timeline. */
+  boltCycleT?: number;
 }
 
 /** Ключевой кадр анимации: смещение относительно базовой позы. */
@@ -104,6 +108,10 @@ export class ViewModel {
 
   private readonly leftArm: TransformNode;
   private readonly rightArm: TransformNode;
+  /** Общая рига рук; пока оружие в руках, она висит на этом вьюмодели. */
+  private readonly arms: FpsArms | null;
+  /** Куда вернуть ствол, когда ригу заберёт другое оружие. */
+  private readonly bodyRest: { pos: Vector3; rot: Vector3 };
   private readonly allMeshes: Mesh[] = [];
   private readonly flashPlane: Mesh | null = null;
   private readonly flashLight: PointLight | null = null;
@@ -122,6 +130,8 @@ export class ViewModel {
   private boltT = 0;
   private boltTravel = 0.032;
   private readonly boltRest: number;
+  private readonly boltRestRoll: number;
+  private readonly chargingHandleRest: number;
   private flashT = 0;
   private bobPhase = 0;
   private idlePhase = Math.random() * 6;
@@ -142,6 +152,7 @@ export class ViewModel {
   private readonly tmpQuat = new Quaternion();
   private readonly tmpScale = new Vector3();
   private readonly tmpVec = new Vector3();
+  private readonly adsSolve = new Vector3();
   private readonly armTargetPos = new Vector3();
   private readonly armTargetRot = new Vector3();
 
@@ -151,7 +162,8 @@ export class ViewModel {
     factory: ModelFactory,
     kind: WeaponModelKind,
     textures: TextureLibrary,
-    hasMuzzleFlash: boolean
+    hasMuzzleFlash: boolean,
+    arms: FpsArms | null = null
   ) {
     this.root = new TransformNode(`vm-root-${kind}`, scene);
     this.root.parent = parent;
@@ -159,12 +171,21 @@ export class ViewModel {
     this.model = createWeaponModel(kind, scene, this.root, factory);
     this.allMeshes.push(...this.model.meshes);
     this.boltRest = this.model.bolt ? this.model.bolt.position.z : 0;
+    this.boltRestRoll = this.model.bolt?.rotation.z ?? 0;
+    this.chargingHandleRest = this.model.chargingHandle?.position.z ?? 0;
 
     this.leftArm = new TransformNode("vm-left-arm", scene);
     this.leftArm.parent = this.model.body;
     this.rightArm = new TransformNode("vm-right-arm", scene);
     this.rightArm.parent = this.model.body;
-    this.allMeshes.push(...buildHands(scene, factory, this.model.hands, this.leftArm, this.rightArm));
+
+    // Рига рук заменяет процедурные кисти: оружие держат настоящие анимированные
+    // кисти, поэтому строить перчатки из примитивов больше незачем.
+    this.arms = arms && this.model.hands.rig ? arms : null;
+    this.bodyRest = { pos: this.model.body.position.clone(), rot: this.model.body.rotation.clone() };
+    if (!this.arms) {
+      this.allMeshes.push(...buildHands(scene, factory, this.model.hands, this.leftArm, this.rightArm));
+    }
 
     if (hasMuzzleFlash) {
       const flash = MeshBuilder.CreatePlane("vm-flash", { size: 0.34 }, scene);
@@ -199,7 +220,7 @@ export class ViewModel {
     this.fillLight.diffuse = new Color3(0.85, 0.88, 0.95);
     this.fillLight.intensity = 1.15;
     this.fillLight.range = 5;
-    this.fillLight.includedOnlyMeshes = this.allMeshes;
+    this.fillLight.includedOnlyMeshes = this.arms ? [...this.allMeshes, ...this.arms.meshes] : this.allMeshes;
 
     this.curPos.copyFrom(this.model.poses.hip.pos);
     this.curRot.copyFrom(this.model.poses.hip.rot);
@@ -212,7 +233,27 @@ export class ViewModel {
   setActive(active: boolean): void {
     this.root.setEnabled(active);
     this.fillLight.setEnabled(active);
+    if (this.arms) {
+      const body = this.model.body;
+      if (active) {
+        // Ригу забирает то оружие, которое сейчас в руках. Ствол живёт в
+        // держателе рядом с ригой, а его позу каждый кадр считают по кистям.
+        this.arms.attachTo(this.root);
+        this.arms.clearAction();
+        this.arms.setVisible(true);
+        body.parent = this.arms.mount;
+        this.arms.hold(this.model);
+      } else if (body.parent === this.arms.mount) {
+        this.arms.hold(null);
+        body.parent = this.root;
+        body.rotationQuaternion = null;
+        body.position.copyFrom(this.bodyRest.pos);
+        body.rotation.copyFrom(this.bodyRest.rot);
+        if (this.arms.attachedTo === this.root) this.arms.attachTo(null);
+      }
+    }
     if (!active) {
+      this.resetBoltCycle();
       this.actionKeys = null;
       this.flashT = 0;
       if (this.flashPlane) this.flashPlane.isVisible = false;
@@ -223,10 +264,14 @@ export class ViewModel {
   /** Импульс отдачи вьюмодели; в прицеле он заметно слабее. */
   fire(adsT: number, strength = 1): void {
     const scale = lerp(1, 0.45, adsT) * strength;
+    // Клип отдачи рук держим чуть дольше интервала между выстрелами, иначе в
+    // автоматическом огне руки успевают вернуться в покой между импульсами.
+    this.arms?.trigger("fire", 0.13);
     this.kickPosVel -= randRange(1.5, 2.1) * scale;
     this.kickRotVel -= randRange(5.5, 7.5) * scale;
     this.kickRollVel += randRange(-4, 4) * scale;
-    this.boltT = 1;
+    // A manual bolt remains locked during firing; only the hand opens it.
+    this.boltT = this.model.manualBolt ? 0 : 1;
     this.boltTravel = 0.032;
 
     if (this.flashPlane && this.flashLight) {
@@ -239,10 +284,16 @@ export class ViewModel {
     }
   }
 
-  /** Отдельный цикл затвора (болтовая винтовка перезаряжается после выстрела). */
-  cycleBolt(travel = 0.05): void {
-    this.boltT = 1;
-    this.boltTravel = travel;
+  /** Clear an interrupted cycle on holster, reload, death or session reset. */
+  resetBoltCycle(): void {
+    if (!this.model.manualBolt) return;
+    this.boltT = 0;
+    this.rightArm.position.setAll(0);
+    this.rightArm.rotation.setAll(0);
+    if (this.model.bolt) {
+      this.model.bolt.position.z = this.boltRest;
+      this.model.bolt.rotation.z = this.boltRestRoll;
+    }
   }
 
   /** Проиграть анимацию действия: смещения накладываются поверх базовой позы. */
@@ -302,8 +353,22 @@ export class ViewModel {
     this.updateSway(dt, ctx);
     this.updateSprings(dt);
     this.updateAction(dt);
+    // Руки считаем до позы: прицеливание опирается на то, где оказалась марка.
+    if (this.arms && this.arms.attachedTo === this.root) {
+      this.arms.update(dt, {
+        speedRatio: ctx.speedRatio,
+        sprintT: ctx.sprintT,
+        adsT: ctx.adsT,
+        reloadT: ctx.reloadT,
+        reloadEmpty: ctx.reloadEmpty,
+        equipT: ctx.equipT,
+        boltCycleT: ctx.boltCycleT,
+      });
+    }
     this.composePose(dt, ctx);
     this.updateLeftArm(dt, ctx);
+    this.updateManualBolt(ctx);
+    this.updateChargingHandle(ctx);
     this.updateFlash(dt);
     this.updateFallingMags(dt);
   }
@@ -314,6 +379,7 @@ export class ViewModel {
     if (hide === this.adsHidden) return;
     this.adsHidden = hide;
     for (const m of this.allMeshes) m.isVisible = !hide;
+    this.arms?.setVisible(!hide);
     if (hide && this.flashPlane) this.flashPlane.isVisible = false;
   }
 
@@ -337,7 +403,7 @@ export class ViewModel {
     [this.kickRoll, this.kickRollVel] = spring(this.kickRoll, this.kickRollVel, 0, 220, 20, dt);
 
     const bolt = this.model.bolt;
-    if (!bolt) return;
+    if (!bolt || this.model.manualBolt) return;
     if (this.boltT > 0) {
       this.boltT = Math.max(0, this.boltT - dt / 0.055);
       // Затвор уходит назад и возвращается за один цикл.
@@ -367,12 +433,20 @@ export class ViewModel {
     this.tmpRot.copyFrom(poses.hip.rot);
 
     const ads = smoothstep(ctx.adsT);
-    Vector3.LerpToRef(this.tmpPos, poses.ads.pos, ads, this.tmpPos);
+    Vector3.LerpToRef(this.tmpPos, this.adsPosition(poses.ads.pos), ads, this.tmpPos);
     Vector3.LerpToRef(this.tmpRot, poses.ads.rot, ads, this.tmpRot);
 
     const sprint = ctx.sprintT * (1 - ads);
     Vector3.LerpToRef(this.tmpPos, poses.sprint.pos, sprint, this.tmpPos);
     Vector3.LerpToRef(this.tmpRot, poses.sprint.rot, sprint, this.tmpRot);
+
+    if (ctx.boltCycleT !== undefined && this.model.manualBolt) {
+      const weight = sampleBoltCycle(ctx.boltCycleT).pose;
+      // Roll the action toward the camera while the left hand supports it.
+      this.tmpPos.addInPlaceFromFloats(-0.035 * weight, -0.012 * weight, 0.035 * weight);
+      this.tmpRot.y -= 0.12 * weight;
+      this.tmpRot.z -= 0.23 * weight;
+    }
 
     if (ctx.reloadT > 0) {
       // Ствол уходит вниз-влево в начале и возвращается в конце анимации.
@@ -429,9 +503,22 @@ export class ViewModel {
     this.root.rotation.copyFrom(this.curRot);
   }
 
+  /**
+   * Куда увести ригу при прицеливании. С анимированными руками фиксированная
+   * поза не годится: кисти живут своей жизнью, и марка уезжала бы с центра.
+   * Поэтому каждый кадр гасим её собственное смещение по горизонтали и
+   * вертикали — марка садится ровно на перекрестье.
+   */
+  private adsPosition(fallback: Vector3): Vector3 {
+    if (!this.arms || !this.model.sight) return fallback;
+    this.arms.sightInRoot(this.model, this.adsSolve);
+    this.adsSolve.set(-this.adsSolve.x, -this.adsSolve.y, fallback.z);
+    return this.adsSolve;
+  }
+
   /** Левая рука снимает и ставит магазин, затем возвращается на цевьё. */
   private updateLeftArm(dt: number, ctx: ViewModelContext): void {
-    if (!this.model.hands.left) return;
+    if (this.arms || !this.model.hands.left) return;
 
     if (ctx.reloadT > 0) {
       sampleKeys(
@@ -468,6 +555,40 @@ export class ViewModel {
       this.flashPlane.isVisible = false;
       this.flashLight.intensity = 0;
     }
+  }
+
+  private updateManualBolt(ctx: ViewModelContext): void {
+    const setup = this.model.manualBolt, bolt = this.model.bolt, hand = this.model.hands.right;
+    if (!setup || !bolt || !hand) return;
+    if (ctx.boltCycleT === undefined) { this.resetBoltCycle(); return; }
+    const { grip, lift, pull } = sampleBoltCycle(ctx.boltCycleT);
+    bolt.position.z = this.boltRest - pull * setup.travel;
+    bolt.rotation.z = this.boltRestRoll + lift * setup.liftAngle;
+
+    // The hand follows the actual handle, including its upward rotation and
+    // rearward travel. Both forearm and glove remain on the same animation node.
+    const angle = bolt.rotation.z;
+    const target = new Vector3(
+      bolt.position.x + setup.handle.x * Math.cos(angle) - setup.handle.y * Math.sin(angle),
+      bolt.position.y + setup.handle.x * Math.sin(angle) + setup.handle.y * Math.cos(angle),
+      bolt.position.z + setup.handle.z,
+    );
+    const armRotation = new Vector3(0.3, -0.12, 0.12 + lift * 0.45);
+    const palm = new Vector3(0.006, -0.01, 0.026);
+    palm.rotateByQuaternionToRef(Quaternion.FromEulerVector(hand.rot), palm).addInPlace(hand.pos);
+    palm.rotateByQuaternionToRef(Quaternion.FromEulerVector(armRotation), palm);
+    this.rightArm.position.copyFrom(target.subtract(palm).scaleInPlace(grip));
+    this.rightArm.rotation.copyFrom(armRotation.scaleInPlace(grip));
+  }
+
+  private updateChargingHandle(ctx: ViewModelContext): void {
+    const handle = this.model.chargingHandle;
+    if (!handle) return;
+    const t = ctx.reloadT;
+    const pull = ctx.reloadEmpty && t >= 0.74 && t <= 0.84
+      ? t < 0.8 ? smoothstep((t - 0.74) / 0.06) : 1 - smoothstep((t - 0.8) / 0.04)
+      : 0;
+    handle.position.z = this.chargingHandleRest - pull * 0.045;
   }
 
   private updateFallingMags(dt: number): void {

@@ -111,6 +111,9 @@ export class Melee implements IWeapon {
   get recoilAim(): AimOffset {
     return ZERO_AIM;
   }
+  get barrelHeat(): number {
+    return 0;
+  }
   get viewPunch(): ViewPunch {
     return this.punch.value;
   }
@@ -263,6 +266,14 @@ export class Melee implements IWeapon {
   }
 
   private static hittablePredicate(mesh: AbstractMesh): boolean {
-    return mesh.isPickable && mesh.isVisible && mesh.isEnabled() && mesh.renderingGroupId !== VIEWMODEL_LAYER;
+    // У бойцов в модели из GLB зоны поражения — невидимые примитивы под ней:
+    // стрелять по ним надо, а рисовать их не нужно.
+    const meta = mesh.metadata as { hitProxy?: boolean } | undefined;
+    return (
+      mesh.isPickable &&
+      (mesh.isVisible || meta?.hitProxy === true) &&
+      mesh.isEnabled() &&
+      mesh.renderingGroupId !== VIEWMODEL_LAYER
+    );
   }
 }

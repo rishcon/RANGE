@@ -10,6 +10,7 @@ import { RecoilController, type ViewPunch } from "./Recoil";
 import { VIEWMODEL_LAYER, type ViewModel } from "./ViewModel";
 import { shotInterval, type SightType, type WeaponConfig } from "./WeaponConfig";
 import { MOUSE_ALT, MOUSE_FIRE, type HudAmmo, type IWeapon, type SessionStats } from "./Types";
+import { BOLT_CYCLE } from "./BoltCycle";
 
 export type FirearmState = "ready" | "reloading";
 
@@ -38,7 +39,9 @@ export class Firearm implements IWeapon {
   private state: FirearmState = "ready";
   private fireTimer = 0;
   private cycleTimer = 0;
+  private cycleDuration = 0;
   private boltPlayed = true;
+  private boltClosed = true;
   private timeSinceShot = 10;
   private triggerWasDown = false;
   private dryFired = false;
@@ -145,6 +148,10 @@ export class Firearm implements IWeapon {
     return this.recoil;
   }
 
+  get barrelHeat(): number {
+    return this.recoil.heat;
+  }
+
   get viewPunch(): ViewPunch {
     return this.recoil.view;
   }
@@ -165,7 +172,7 @@ export class Firearm implements IWeapon {
   }
 
   get allowSprint(): boolean {
-    return this.timeSinceShot > 0.22 && !this.adsActive;
+    return this.cycleTimer <= 0 && this.timeSinceShot > 0.22 && !this.adsActive;
   }
 
   /** Включено ли прицеливание (для подсказок и переключения слотов). */
@@ -178,7 +185,10 @@ export class Firearm implements IWeapon {
     this.reserve = this.config.reserveAmmo;
     this.state = "ready";
     this.reloadTimer = 0;
-    this.cycleTimer = 0;
+    this.cancelBoltCycle();
+    this.adsActive = false;
+    this.adsT = 0;
+    this.ejectOnBolt = false;
     this.viewModel.setMagazineVisible(true);
     this.recoil.reset();
   }
@@ -198,7 +208,7 @@ export class Firearm implements IWeapon {
     this.reloadDuration = 0;
     this.adsT = 0;
     this.adsActive = false;
-    this.cycleTimer = 0;
+    this.cancelBoltCycle();
     this.ejectOnBolt = false;
     this.viewModel.setMagazineVisible(true);
   }
@@ -211,15 +221,18 @@ export class Firearm implements IWeapon {
 
     if (this.cycleTimer > 0) {
       this.cycleTimer = Math.max(0, this.cycleTimer - dt);
-      // Затвор передёргивается ближе к концу паузы — вместе с ним летит гильза.
-      if (!this.boltPlayed && this.cycleTimer < this.config.cycleTime * 0.55) {
+      const progress = 1 - this.cycleTimer / this.cycleDuration;
+      if (!this.boltPlayed && progress >= BOLT_CYCLE.eject) {
         this.boltPlayed = true;
-        this.viewModel.cycleBolt(0.075);
         this.audio.boltPull();
         if (this.ejectOnBolt) {
           this.ejectOnBolt = false;
           this.ejectShell();
         }
+      }
+      if (!this.boltClosed && progress >= BOLT_CYCLE.close) {
+        this.boltClosed = true;
+        this.audio.boltRelease();
       }
     }
 
@@ -231,7 +244,10 @@ export class Firearm implements IWeapon {
     if (!canAct || this.state === "reloading") this.adsActive = false;
 
     const speed = 1 / Math.max(0.01, this.config.adsTime);
-    this.adsT = moveTowards(this.adsT, this.adsActive ? 1 : 0, speed * dt);
+    // Keep the player's toggle intent, but lower the scope until the hand is
+    // back on the grip. RMB during the cycle can cancel the automatic return.
+    const cycling = this.cycleTimer > this.cycleDuration * (1 - BOLT_CYCLE.aim);
+    this.adsT = moveTowards(this.adsT, this.adsActive && !cycling ? 1 : 0, speed * dt);
 
     this.bloom = Math.max(0, this.bloom - this.config.spreadRecovery * dt);
     this.recoil.update(dt);
@@ -274,6 +290,7 @@ export class Firearm implements IWeapon {
       reloadT: this.state === "reloading" ? this.reloadProgress : 0,
       reloadEmpty: this.reloadWasEmpty,
       equipT,
+      boltCycleT: this.cycleTimer > 0 ? 1 - this.cycleTimer / this.cycleDuration : undefined,
     });
   }
 
@@ -288,8 +305,7 @@ export class Firearm implements IWeapon {
 
     if (cfg.fireMode === "bolt") {
       // У болтовой гильза вылетает не с выстрелом, а при передёргивании затвора.
-      this.cycleTimer = cfg.cycleTime;
-      this.boltPlayed = false;
+      this.startBoltCycle();
       this.ejectOnBolt = true;
     }
 
@@ -339,7 +355,10 @@ export class Firearm implements IWeapon {
       (this.player.isMoving ? 1.12 : 1);
     this.recoil.kick(recoilMul);
 
-    this.viewModel.fire(this.adsT, cfg.id === "sniper" ? 1.6 : cfg.id === "pistol" ? 0.8 : 1);
+    // Модель в руках дёргается ровно на ту силу, что ушла в прицел: разогретый
+    // ствол и редкие клевки видно по оружию, а не только по крестику.
+    const base = cfg.id === "sniper" ? 1.6 : cfg.id === "pistol" ? 0.8 : 1;
+    this.viewModel.fire(this.adsT, base * Math.min(2.4, this.recoil.lastKick.strength));
     this.effects.tracer(this.muzzlePos, this.endPoint);
     if (cfg.fireMode !== "bolt") this.ejectShell();
     this.audio.shot(cfg.sound);
@@ -389,7 +408,15 @@ export class Firearm implements IWeapon {
   }
 
   private static shootablePredicate(mesh: AbstractMesh): boolean {
-    return mesh.isPickable && mesh.isVisible && mesh.isEnabled() && mesh.renderingGroupId !== VIEWMODEL_LAYER;
+    // У бойцов в модели из GLB зоны поражения — невидимые примитивы под ней:
+    // стрелять по ним надо, а рисовать их не нужно.
+    const meta = mesh.metadata as { hitProxy?: boolean } | undefined;
+    return (
+      mesh.isPickable &&
+      (mesh.isVisible || meta?.hitProxy === true) &&
+      mesh.isEnabled() &&
+      mesh.renderingGroupId !== VIEWMODEL_LAYER
+    );
   }
 
   // ----------------------------------------------------------- перезарядка
@@ -421,7 +448,7 @@ export class Firearm implements IWeapon {
     this.reloadPhaseIndex = 0;
     this.state = "reloading";
     this.adsActive = false;
-    this.cycleTimer = 0;
+    this.cancelBoltCycle();
 
     // Раскадровка: отсоединение магазина -> сброс -> установка -> затвор.
     this.reloadPhases = [
@@ -443,7 +470,7 @@ export class Firearm implements IWeapon {
       },
     ];
 
-    if (this.reloadWasEmpty) {
+    if (this.reloadWasEmpty && this.config.fireMode !== "bolt") {
       this.reloadPhases.push({ at: 0.74, fn: () => this.audio.boltPull() });
       this.reloadPhases.push({ at: 0.82, fn: () => this.audio.boltRelease() });
     }
@@ -463,12 +490,25 @@ export class Firearm implements IWeapon {
     this.viewModel.setMagazineVisible(true);
     this.recoil.reset();
 
-    // Болтовая винтовка после смены магазина досылает патрон: рука дёргает
-    // затвор, вылетает гильза.
+    // Chamber a round after changing magazines. Eject only if a spent case
+    // remains from a shot whose cycle was interrupted by this reload.
     if (this.config.fireMode === "bolt") {
-      this.cycleTimer = this.config.cycleTime * 0.95;
-      this.boltPlayed = false;
-      this.ejectOnBolt = true;
+      this.startBoltCycle();
     }
+  }
+
+  private startBoltCycle(): void {
+    this.cycleDuration = Math.max(0.01, this.config.cycleTime);
+    this.cycleTimer = this.cycleDuration;
+    this.boltPlayed = false;
+    this.boltClosed = false;
+  }
+
+  private cancelBoltCycle(): void {
+    this.cycleTimer = 0;
+    this.cycleDuration = 0;
+    this.boltPlayed = true;
+    this.boltClosed = true;
+    this.viewModel.resetBoltCycle();
   }
 }

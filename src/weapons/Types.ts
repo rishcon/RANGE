@@ -49,6 +49,8 @@ export interface IWeapon {
   readonly sightType: SightType | "none";
   /** Полуугол конуса разброса в градусах; 0 — марка не нужна. */
   readonly spreadDegrees: number;
+  /** Нагрев ствола 0..1: горячий бьёт жёстче — HUD подкрашивает этим марку. */
+  readonly barrelHeat: number;
   readonly allowSprint: boolean;
   /** Идёт действие, во время которого нельзя менять оружие. */
   readonly busy: boolean;

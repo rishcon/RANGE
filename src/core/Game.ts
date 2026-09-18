@@ -1,4 +1,7 @@
-import { DefaultRenderingPipeline, Engine, ImageProcessingConfiguration, Scene, Vector3 } from "@babylonjs/core";
+import { DefaultRenderingPipeline, Engine, ImageProcessingConfiguration, Scene, Vector3, type AssetContainer } from "@babylonjs/core";
+import { loadClassicM4 } from "../weapons/ClassicM4";
+import { loadG18 } from "../weapons/G18";
+import { loadSniper, loadBayonet } from "../weapons/ImportedArsenal";
 import { AudioManager } from "../fx/AudioManager";
 import { Effects } from "../fx/Effects";
 import { GrenadeSystem } from "../fx/Grenades";
@@ -18,6 +21,8 @@ import { Melee } from "../weapons/Melee";
 import { createStats, type IWeapon, type SessionStats } from "../weapons/Types";
 import { FIREARMS, GRENADES, KNIFE } from "../weapons/WeaponConfig";
 import { ModelFactory, VIEWMODEL_LAYER } from "../weapons/models";
+import { FpsArms, loadFpsArms } from "../weapons/FpsArms";
+import { loadEnemyBody } from "../characters/SkinnedBody";
 import { ViewModel } from "../weapons/ViewModel";
 import { clamp, hFovToVFov, lerp, smoothstep } from "./MathUtil";
 import { settings } from "./Settings";
@@ -26,8 +31,6 @@ type Mode = "menu" | "playing";
 
 /** Сборка всех подсистем и главный цикл. */
 export class Game {
-  private readonly engine: Engine;
-  private readonly scene: Scene;
   private readonly input: InputManager;
   private readonly audio = new AudioManager();
   private readonly level: Level;
@@ -44,6 +47,7 @@ export class Game {
   /** Идёт ли сейчас дуэль: в ней отключены полигонные бойцы. */
   private duelActive = false;
   /** Камера смерти: облетает тело игрока после проигранного раунда. */
+  private readonly arms: FpsArms;
   private readonly playerDeath = { active: false, timer: 0, orbit: 0 };
   private readonly deathTarget = new Vector3();
   private readonly stats: SessionStats = createStats();
@@ -66,20 +70,49 @@ export class Game {
   private renderedTime = 0;
   private displayFps = 60;
 
-  constructor(private readonly canvas: HTMLCanvasElement) {
-    this.engine = new Engine(canvas, true, {
+  /** Wait for the textured weapon before enabling the main menu. */
+  static async create(canvas: HTMLCanvasElement): Promise<Game> {
+    const engine = new Engine(canvas, true, {
       stencil: true,
       antialias: true,
       powerPreference: "high-performance",
       preserveDrawingBuffer: false,
     });
+    const scene = new Scene(engine);
+    try {
+      const [rifleAsset, pistolAsset, sniperAsset, knifeAsset, armsAsset, enemyAsset] = await Promise.all([
+        loadClassicM4(scene), loadG18(scene), loadSniper(scene), loadBayonet(scene),
+        loadFpsArms(scene), loadEnemyBody(scene),
+      ]);
+      return new Game(canvas, engine, scene, rifleAsset, pistolAsset, sniperAsset, knifeAsset, armsAsset, enemyAsset);
+    } catch (error) {
+      scene.dispose();
+      engine.dispose();
+      throw error;
+    }
+  }
+
+  private constructor(
+    private readonly canvas: HTMLCanvasElement,
+    private readonly engine: Engine,
+    private readonly scene: Scene,
+    private readonly rifleAsset: AssetContainer,
+    private readonly pistolAsset: AssetContainer,
+    private readonly sniperAsset: AssetContainer,
+    private readonly knifeAsset: AssetContainer,
+    armsAsset: AssetContainer,
+    enemyAsset: AssetContainer
+  ) {
     // Итоговое разрешение = CSS-размер * dpr * renderScale (см. applySettings).
     this.engine.setHardwareScalingLevel(1 / Math.min(window.devicePixelRatio || 1, 1.5));
 
-    this.scene = new Scene(this.engine);
     this.scene.skipPointerMovePicking = true;
     // Слой вьюмодели очищает глубину: ствол не проваливается в стены.
     this.scene.setRenderingAutoClearDepthStencil(VIEWMODEL_LAYER, true, true, true);
+
+    // Руки от первого лица общие для всего арсенала: ригу забирает то оружие,
+    // которое сейчас в руках.
+    this.arms = new FpsArms(this.scene, armsAsset);
 
     this.level = new Level(this.scene);
     this.effects = new Effects(this.scene, this.level.textures);
@@ -95,7 +128,7 @@ export class Game {
 
     // Тело игрока видно при взгляде вниз; бойцы живут по своим маршрутам.
     this.playerBody = new PlayerBody(this.scene, this.player);
-    this.enemies = new EnemyManager(this.scene);
+    this.enemies = new EnemyManager(this.scene, enemyAsset);
     for (const enemy of this.enemies.all) this.targets.addHittable(enemy);
 
     this.grenadeSystem = new GrenadeSystem(
@@ -121,7 +154,7 @@ export class Game {
       },
       onPlayerDied: (direction) => this.killPlayer(direction),
       onRoundStart: () => this.revivePlayer(),
-    });
+    }, enemyAsset);
     this.targets.addHittable(this.duel.bot);
 
     this.inventory = new Inventory(this.buildArsenal(), this.audio);
@@ -131,7 +164,7 @@ export class Game {
 
     this.targets.forEachShadowCaster((m) => this.level.addShadowCaster(m));
     this.enemies.forEachMesh((m) => this.level.addShadowCaster(m));
-    for (const m of this.duel.bot.character.meshes) this.level.addShadowCaster(m);
+    for (const m of this.duel.bot.character.skinMeshes) this.level.addShadowCaster(m);
     for (const m of this.playerBody.meshes) this.level.addShadowCaster(m);
     this.level.finalize();
 
@@ -179,14 +212,15 @@ export class Game {
   // ------------------------------------------------------------------ арсенал
 
   private buildArsenal(): IWeapon[] {
-    const factory = new ModelFactory(this.scene);
+    const factory = new ModelFactory(this.scene, this.rifleAsset, this.pistolAsset, this.sniperAsset, this.knifeAsset);
+    const arms = this.arms;
     const textures = this.level.textures;
     const camera = this.player.camera;
     const weapons: IWeapon[] = [];
     const onHit = (zone: HitZone, killed: boolean): void => this.hud.hitmarker(zone, killed);
 
     for (const cfg of FIREARMS) {
-      const vm = new ViewModel(this.scene, camera, factory, cfg.modelKind, textures, true);
+      const vm = new ViewModel(this.scene, camera, factory, cfg.modelKind, textures, true, arms);
       const firearm = new Firearm(
         cfg,
         vm,
@@ -202,13 +236,13 @@ export class Game {
       weapons.push(firearm);
     }
 
-    const knifeVm = new ViewModel(this.scene, camera, factory, "knife", textures, false);
+    const knifeVm = new ViewModel(this.scene, camera, factory, "knife", textures, false, arms);
     weapons.push(
       new Melee(KNIFE, knifeVm, this.scene, this.player, this.effects, this.audio, this.targets, this.stats, onHit)
     );
 
     for (const cfg of GRENADES) {
-      const vm = new ViewModel(this.scene, camera, factory, cfg.kind, textures, false);
+      const vm = new ViewModel(this.scene, camera, factory, cfg.kind, textures, false, arms);
       const grenade = new GrenadeWeapon(cfg, vm, this.player, this.audio, this.grenadeSystem);
       this.grenadeWeapons.push(grenade);
       weapons.push(grenade);
@@ -522,6 +556,7 @@ export class Game {
         reloading: weapon.isReloading,
         reloadProgress: weapon.reloadProgress,
         spreadDeg: weapon.spreadDegrees,
+        barrelHeat: weapon.barrelHeat,
         fovV: this.player.camera.fov,
         adsT: weapon.aimProgress,
         sight: weapon.sightType,

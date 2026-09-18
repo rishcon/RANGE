@@ -102,6 +102,9 @@ export class GrenadeWeapon implements IWeapon {
   get recoilAim(): AimOffset {
     return ZERO_AIM;
   }
+  get barrelHeat(): number {
+    return 0;
+  }
   get viewPunch(): ViewPunch {
     return this.punch.value;
   }

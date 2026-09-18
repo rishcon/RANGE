@@ -1,4 +1,4 @@
-import { Mesh, Scene, Vector3 } from "@babylonjs/core";
+import { type AssetContainer, Mesh, Scene, Vector3 } from "@babylonjs/core";
 import { clamp01, damp, randRange } from "../core/MathUtil";
 import type { HitContext, HitResult, HitZone, IHittable } from "../world/Targets";
 import { Character, ENEMY_PALETTE, type CharacterState } from "./Character";
@@ -48,13 +48,14 @@ export class Enemy implements IHittable {
     death: 0,
   };
 
-  constructor(scene: Scene, from: Vector3, to: Vector3) {
+  constructor(scene: Scene, from: Vector3, to: Vector3, skin?: AssetContainer, index = 0) {
     this.from = from.clone();
     this.to = to.clone();
     this.position.copyFrom(from);
     this.facing = Math.atan2(to.x - from.x, to.z - from.z);
 
     this.character = new Character(scene, ENEMY_PALETTE, { holdWeapon: true, namePrefix: "enemy" });
+    if (skin) this.character.attachSkin(skin, `enemy${index}`);
     this.character.setHitOwner(this);
     this.character.root.position.copyFrom(this.position);
     this.character.root.rotation.y = this.facing;
@@ -249,7 +250,7 @@ export class Enemy implements IHittable {
 export class EnemyManager {
   private readonly enemies: Enemy[] = [];
 
-  constructor(scene: Scene) {
+  constructor(scene: Scene, skin?: AssetContainer) {
     // Маршруты вдоль дорожек полигона: бойцы ходят поперёк линии огня.
     const routes: Array<[Vector3, Vector3]> = [
       [new Vector3(-7.5, 0, 21), new Vector3(-2.5, 0, 21)],
@@ -261,7 +262,7 @@ export class EnemyManager {
       [new Vector3(10, 0, 55), new Vector3(16, 0, 55)],
     ];
 
-    for (const [from, to] of routes) this.enemies.push(new Enemy(scene, from, to));
+    routes.forEach(([from, to], i) => this.enemies.push(new Enemy(scene, from, to, skin, i)));
   }
 
   get all(): readonly Enemy[] {
@@ -276,7 +277,11 @@ export class EnemyManager {
     for (const e of this.enemies) e.reset();
   }
 
+  /** Меши для теней: у одетых бойцов это модель, у процедурных — примитивы. */
   forEachMesh(fn: (mesh: Mesh) => void): void {
-    for (const e of this.enemies) for (const m of e.character.meshes) fn(m);
+    for (const e of this.enemies) {
+      const skinned = e.character.skinMeshes;
+      for (const m of skinned.length > 0 ? skinned : e.character.meshes) fn(m);
+    }
   }
 }

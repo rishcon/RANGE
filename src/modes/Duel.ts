@@ -1,4 +1,4 @@
-import { AbstractMesh, Ray, Scene, Vector3 } from "@babylonjs/core";
+import { AbstractMesh, type AssetContainer, Ray, Scene, Vector3 } from "@babylonjs/core";
 import { Character, ENEMY_PALETTE, type CharacterState } from "../characters/Character";
 import { clamp01, damp, randRange } from "../core/MathUtil";
 import type { AudioManager } from "../fx/AudioManager";
@@ -84,9 +84,11 @@ export class DuelBot implements IHittable {
   constructor(
     private readonly scene: Scene,
     private readonly audio: AudioManager,
-    private readonly callbacks: DuelCallbacks
+    private readonly callbacks: DuelCallbacks,
+    skin?: AssetContainer
   ) {
     this.character = new Character(scene, ENEMY_PALETTE, { holdWeapon: true, namePrefix: "duelbot" });
+    if (skin) this.character.attachSkin(skin, "duelbot");
     this.character.setHitOwner(this);
   }
 
@@ -378,12 +380,13 @@ export class DuelMode {
       onPlayerHit: (damage: number, direction: Vector3) => void;
       onPlayerDied: (direction: Vector3) => void;
       onRoundStart: () => void;
-    }
+    },
+    skin?: AssetContainer
   ) {
     this.bot = new DuelBot(scene, audio, {
       onPlayerDamaged: (damage, direction) => this.damagePlayer(damage, direction),
       onBotKilled: () => this.endRound(true),
-    });
+    }, skin);
     this.bot.setEnabled(false);
   }
 

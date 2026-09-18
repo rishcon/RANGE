@@ -68,7 +68,34 @@ export interface WeaponConfig {
    *  выстрелами, иначе паттерн «съедается» возвратом прямо в очереди). */
   recoilRecoveryDelay: number;
   recoilRecoverySpeed: number;
+  /** Собственная частота пружины прицела, рад/с — скорость подброса. */
   recoilAttack: number;
+  /** Затухание той же пружины: <1 даёт перелёт и «оседание» ствола обратно. */
+  recoilSpringDamping: number;
+  /** Доп. импульс скорости на выстреле — резкий клевок поверх паттерна. */
+  recoilSnap: number;
+
+  /** Во сколько раз медленнее вертикали возвращается горизонталь. */
+  recoilYawRecoveryMul: number;
+  /** Какая доля увода «залипает» и сама не возвращается. */
+  recoilYawStick: number;
+  /** Скорость рассасывания залипшего увода, 1/сек. */
+  recoilYawStickDecay: number;
+
+  /** Нагрев ствола за выстрел и остывание в секунду (нагрев 0..1). */
+  recoilHeatPerShot: number;
+  recoilHeatCool: number;
+  /** Прибавка к силе отдачи и к разбросу паттерна при полном нагреве. */
+  recoilHeatRecoil: number;
+  recoilHeatJitter: number;
+
+  /** Амплитуда высокочастотного тремора на боевом канале, градусы. */
+  recoilTremor: number;
+  /** Вероятность резкого клевка на выстрел и во сколько раз он сильнее. */
+  recoilHitchChance: number;
+  recoilHitchMul: number;
+  /** Разброс стартовой фазы внутри таблицы паттерна (в ступенях). */
+  recoilPatternSmear: number;
 
   /** Сколько первых выстрелов очереди ослаблены и во сколько раз. */
   recoilFirstShots: number;
@@ -101,8 +128,8 @@ export interface WeaponConfig {
 /**
  * Паттерн винтовки: первые три выстрела почти строго вверх и слабее остальных
  * (короткие очереди остаются точными), затем ствол резко уходит вверх и начинает
- * «змейку» вправо-влево. Суммарно за магазин набегает около 20° вертикали —
- * удержать зажим без оттяжки мыши вниз невозможно.
+ * «змейку» вправо-влево. С учётом нагрева ствола за магазин набегает около 25°
+ * вертикали — удержать зажим без оттяжки мыши вниз невозможно.
  */
 const AR15_PATTERN: RecoilStep[] = [
   { up: 0.55, side: 0.02 },
@@ -158,7 +185,7 @@ const PISTOL_PATTERN: RecoilStep[] = [
 
 export const AR15: WeaponConfig = {
   id: "ar15",
-  name: "AR-15",
+  name: "M4",
   caliber: "5.56×45",
   slot: 1,
   modelKind: "rifle",
@@ -198,6 +225,23 @@ export const AR15: WeaponConfig = {
   recoilRecoveryDelay: 0.14,
   recoilRecoverySpeed: 6.5,
   recoilAttack: 30,
+  recoilSpringDamping: 0.6,
+  recoilSnap: 0.3,
+
+  recoilYawRecoveryMul: 0.55,
+  recoilYawStick: 0.35,
+  recoilYawStickDecay: 0.7,
+
+  // Полный нагрев примерно за 18 выстрелов подряд, остывание за три секунды.
+  recoilHeatPerShot: 0.055,
+  recoilHeatCool: 0.35,
+  recoilHeatRecoil: 0.22,
+  recoilHeatJitter: 0.65,
+
+  recoilTremor: 0.12,
+  recoilHitchChance: 0.03,
+  recoilHitchMul: 1.9,
+  recoilPatternSmear: 0.85,
 
   recoilFirstShots: 2,
   recoilFirstShotMul: 0.8,
@@ -259,6 +303,24 @@ export const SNIPER: WeaponConfig = {
   recoilRecoveryDelay: 0.35,
   recoilRecoverySpeed: 4.5,
   recoilAttack: 26,
+  // Тяжёлый ствол заметно перелетает и долго оседает обратно.
+  recoilSpringDamping: 0.5,
+  recoilSnap: 0.55,
+
+  recoilYawRecoveryMul: 0.7,
+  recoilYawStick: 0.2,
+  recoilYawStickDecay: 0.9,
+
+  recoilHeatPerShot: 0.12,
+  recoilHeatCool: 0.5,
+  recoilHeatRecoil: 0.15,
+  recoilHeatJitter: 0.6,
+
+  // В оптике дрожь видна сильнее всего, поэтому амплитуда минимальная.
+  recoilTremor: 0.05,
+  recoilHitchChance: 0.08,
+  recoilHitchMul: 1.5,
+  recoilPatternSmear: 0.9,
 
   recoilFirstShots: 0,
   recoilFirstShotMul: 1,
@@ -278,7 +340,7 @@ export const SNIPER: WeaponConfig = {
 
 export const PISTOL: WeaponConfig = {
   id: "pistol",
-  name: "P-9",
+  name: "G18",
   caliber: "9×19",
   slot: 2,
   modelKind: "pistol",
@@ -317,6 +379,22 @@ export const PISTOL: WeaponConfig = {
   recoilRecoveryDelay: 0.12,
   recoilRecoverySpeed: 8,
   recoilAttack: 34,
+  recoilSpringDamping: 0.56,
+  recoilSnap: 0.45,
+
+  recoilYawRecoveryMul: 0.6,
+  recoilYawStick: 0.3,
+  recoilYawStickDecay: 0.9,
+
+  recoilHeatPerShot: 0.08,
+  recoilHeatCool: 0.5,
+  recoilHeatRecoil: 0.25,
+  recoilHeatJitter: 0.7,
+
+  recoilTremor: 0.14,
+  recoilHitchChance: 0.04,
+  recoilHitchMul: 1.8,
+  recoilPatternSmear: 0.8,
 
   recoilFirstShots: 1,
   recoilFirstShotMul: 0.85,
@@ -352,7 +430,7 @@ export interface MeleeConfig {
 }
 
 export const KNIFE: MeleeConfig = {
-  name: "НОЖ",
+  name: "M9 BAYONET",
   slot: 3,
   lightDamage: 45,
   heavyDamage: 110,

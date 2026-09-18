@@ -1,4 +1,4 @@
-import { DEG, clamp, damp, randRange, spring } from "../core/MathUtil";
+import { DEG, clamp, damp, randRange, randSign, spring } from "../core/MathUtil";
 import { PATTERN_SCALE, type WeaponConfig } from "./WeaponConfig";
 
 /** Визуальная тряска камеры. На направление выстрела не влияет. */
@@ -8,15 +8,40 @@ export interface ViewPunch {
   roll: number;
 }
 
+/** Чем обернулся последний выстрел — вьюмодель берёт отсюда силу рывка. */
+export interface ShotKick {
+  /** Итоговая сила относительно «холодного» первого выстрела. */
+  strength: number;
+  /** Ствол клюнул заметно резче обычного. */
+  hitch: boolean;
+}
+
+/** Предохранитель от разгона: дальше этих углов отдача прицел не уводит. */
+const AIM_LIMIT_PITCH = 35 * DEG;
+const AIM_LIMIT_YAW = 25 * DEG;
+
 /**
- * Отдача разделена на два независимых канала, как в CS/PUBG:
+ * Отдача собрана из шести слоёв, которые накладываются друг на друга. По
+ * отдельности каждый предсказуем, вместе — паттерн невозможно «заучить
+ * наизусть» и приходится реально бороться со стволом, как в PUBG и CS2.
  *
- * 1. **Смещение прицела** (`pitch`/`yaw`) — детерминированный паттерн плюс
- *    рандомизация и низкочастотный дрейф. Именно оно уводит пули, компенсируется
- *    мышью и возвращается в ноль после паузы в стрельбе.
- * 2. **Тряска камеры** (`view`) — пружинный импульс на каждый выстрел, который
- *    дёргает картинку, но не смещает точку попадания. Он не даёт спокойно
- *    «читать» паттерн и заставляет стрелять короткими очередями.
+ * 1. **Паттерн** — детерминированная основа, но выборка идёт с дробной фазой:
+ *    у каждой очереди своё смещение внутри таблицы, поэтому N-й выстрел не
+ *    попадает в одну и ту же ступень.
+ * 2. **Пружина прицела** — недодемпфированная, поэтому ствол не «приезжает» в
+ *    точку, а подскакивает с перелётом и оседает обратно.
+ * 3. **Залипший увод** — часть горизонтали не возвращается сама, и после
+ *    очереди прицел остаётся сбитым вбок: доводить надо мышью.
+ * 4. **Нагрев ствола** — копится между очередями и медленно уходит. Горячий
+ *    ствол бьёт сильнее, гуляет шире и дрожит заметнее, поэтому третий магазин
+ *    подряд удержать труднее первого.
+ * 5. **Тремор** — высокочастотная дрожь из двух несоизмеримых гармоник на
+ *    боевом канале: длинную очередь физически нельзя держать точно.
+ * 6. **Клевки** — редкие выстрелы с резко усиленным импульсом.
+ *
+ * Всё это живёт в канале прицела (`pitch`/`yaw`) — он уводит пули. Отдельно
+ * идёт чисто визуальная тряска (`view`), которая сбивает картинку, но на точку
+ * попадания не влияет.
  */
 export class RecoilController {
   /** Текущее смещение прицела (радианы). */
@@ -24,18 +49,42 @@ export class RecoilController {
   yaw = 0;
 
   readonly view: ViewPunch = { pitch: 0, yaw: 0, roll: 0 };
+  readonly lastKick: ShotKick = { strength: 1, hitch: false };
 
+  /** Куда «упёрся» ствол: накопленный паттерн, к нему тянется пружина. */
   private targetPitch = 0;
   private targetYaw = 0;
+  /** Состояние недодемпфированной пружины прицела. */
+  private springPitch = 0;
+  private springYaw = 0;
+  private velPitch = 0;
+  private velYaw = 0;
+
   private shotIndex = 0;
   private sinceLastShot = 10;
+
+  /** Нагрев ствола 0..1: копится через очереди, уходит только в паузах. */
+  private barrelHeat = 0;
+  /** Невозвращаемый горизонтальный увод — его игрок правит мышью сам. */
+  private yawBias = 0;
 
   private viewVelPitch = 0;
   private viewVelYaw = 0;
   private viewVelRoll = 0;
 
-  /** Фаза дрейфа — своя у каждой очереди, поэтому паттерн не заучивается наизусть. */
+  /** Фаза дрейфа — своя у каждой очереди, поэтому паттерн не заучивается. */
   private driftSeed = Math.random() * 100;
+  /** Дробное смещение внутри таблицы паттерна — тоже своё у каждой очереди. */
+  private patternPhase = 0;
+
+  private tremorTime = 0;
+  private readonly tremorA = Math.random() * 7;
+  private readonly tremorB = Math.random() * 7;
+  private readonly tremorC = Math.random() * 7;
+  private readonly tremorD = Math.random() * 7;
+
+  /** Рабочая ступень паттерна — чтобы не плодить объекты на каждый выстрел. */
+  private readonly step = { up: 0, side: 0 };
 
   constructor(private readonly cfg: WeaponConfig) {}
 
@@ -43,27 +92,81 @@ export class RecoilController {
     return this.shotIndex;
   }
 
+  /** Нагрев ствола 0..1 — HUD подкрашивает им марку прицела. */
+  get heat(): number {
+    return this.barrelHeat;
+  }
+
+  /**
+   * Ступень паттерна с дробным индексом: между соседними строками таблицы
+   * интерполируем, поэтому счётчик выстрелов больше не даёт ровно те же углы.
+   */
+  private sample(pos: number): { up: number; side: number } {
+    const pattern = this.cfg.pattern;
+    const last = pattern.length - 1;
+    const p = clamp(pos, 0, last);
+    const i = Math.floor(p);
+    const f = p - i;
+    const a = pattern[i]!;
+    const b = pattern[Math.min(i + 1, last)]!;
+    this.step.up = a.up + (b.up - a.up) * f;
+    this.step.side = a.side + (b.side - a.side) * f;
+    return this.step;
+  }
+
   /** Добавить импульс очередного выстрела. */
   kick(multiplier: number): void {
     const cfg = this.cfg;
     const idx = this.shotIndex;
-    const step = cfg.pattern[Math.min(idx, cfg.pattern.length - 1)]!;
+    const heat = this.barrelHeat;
 
-    // Отдача нарастает по ходу очереди, а первые выстрелы ослаблены.
+    const step = this.sample(idx + this.patternPhase);
+
+    // Отдача нарастает по ходу очереди, первые выстрелы ослаблены, а горячий
+    // ствол бьёт сильнее холодного.
     const ramp = Math.min(1 + idx * cfg.recoilRampPerShot, cfg.recoilRampMax);
     const first = idx < cfg.recoilFirstShots ? cfg.recoilFirstShotMul : 1;
-    const m = multiplier * ramp * first;
+    const m = multiplier * ramp * first * (1 + heat * cfg.recoilHeatRecoil);
 
-    const j = cfg.recoilJitter;
-    const up = step.up * randRange(1 - j, 1 + j);
-    // Горизонталь шумит сильнее вертикали, плюс медленный дрейф всей очереди.
-    const drift = Math.sin(this.driftSeed + idx * 0.41) * cfg.recoilDrift;
-    const side = (step.side + drift) * randRange(1 - j * 1.6, 1 + j * 1.6) + randRange(-0.05, 0.05);
+    const j = cfg.recoilJitter * (1 + heat * cfg.recoilHeatJitter);
+    let up = step.up * randRange(1 - j, 1 + j);
 
-    this.targetPitch -= up * PATTERN_SCALE * m;
-    this.targetYaw += side * PATTERN_SCALE * m;
+    // Горизонталь: паттерн плюс две несоизмеримые гармоники дрейфа. Их период
+    // не кратен длине очереди, поэтому «змейка» каждый раз новая.
+    const d = cfg.recoilDrift * (1 + heat * 0.7);
+    const drift =
+      Math.sin(this.driftSeed + idx * 0.41) * d + Math.sin(this.driftSeed * 1.73 + idx * 0.17) * d * 0.45;
+    let side =
+      (step.side + drift) * randRange(1 - j * 1.6, 1 + j * 1.6) + randRange(-0.05, 0.05) * (1 + heat * 0.5);
 
-    this.addViewPunch(m);
+    // Редкий клевок: ствол дёргает резче и уводит вбок. Чем горячее, тем чаще —
+    // под конец долгой перестрелки очередь становится совсем рваной.
+    const hitch = Math.random() < cfg.recoilHitchChance * (1 + heat * 1.5);
+    if (hitch) {
+      up *= cfg.recoilHitchMul;
+      side = side * cfg.recoilHitchMul + randSign() * cfg.recoilDrift * 1.8;
+    }
+
+    const upRad = up * PATTERN_SCALE * m;
+    const sideRad = side * PATTERN_SCALE * m;
+
+    this.targetPitch = clamp(this.targetPitch - upRad, -AIM_LIMIT_PITCH, AIM_LIMIT_PITCH);
+    this.targetYaw = clamp(this.targetYaw + sideRad, -AIM_LIMIT_YAW, AIM_LIMIT_YAW);
+    // Часть увода «залипает»: сама она не уйдёт, доводить придётся мышью.
+    this.yawBias = clamp(this.yawBias + sideRad * cfg.recoilYawStick, -AIM_LIMIT_YAW, AIM_LIMIT_YAW);
+
+    // Добавочный импульс скорости: ствол не просто едет к новой точке, а
+    // подскакивает мимо неё и возвращается.
+    const snap = cfg.recoilAttack * cfg.recoilSnap;
+    this.velPitch -= upRad * snap;
+    this.velYaw += sideRad * snap;
+
+    this.barrelHeat = Math.min(1, this.barrelHeat + cfg.recoilHeatPerShot);
+
+    this.lastKick.strength = m * (hitch ? cfg.recoilHitchMul : 1);
+    this.lastKick.hitch = hitch;
+
+    this.addViewPunch(m, hitch);
 
     this.shotIndex++;
     this.sinceLastShot = 0;
@@ -74,35 +177,76 @@ export class RecoilController {
    * скорость берём как A * 2*sqrt(k) — для выбранного демпфирования это
    * даёт примерно нужный подброс.
    */
-  private addViewPunch(m: number): void {
+  private addViewPunch(m: number, hitch: boolean): void {
     const cfg = this.cfg;
     const impulse = 2 * Math.sqrt(cfg.viewPunchStiffness);
-    this.viewVelPitch -= cfg.viewPunchPitch * DEG * m * randRange(0.75, 1.3) * impulse;
-    this.viewVelYaw += cfg.viewPunchYaw * DEG * m * randRange(-1.3, 1.3) * impulse;
-    this.viewVelRoll += cfg.viewPunchRoll * DEG * m * randRange(-1.2, 1.2) * impulse;
+    // Горячий ствол трясёт картинку сильнее, клевок — ещё сильнее.
+    const k = m * (1 + this.barrelHeat * 0.45) * (hitch ? 1.9 : 1) * impulse;
+    this.viewVelPitch -= cfg.viewPunchPitch * DEG * k * randRange(0.75, 1.3);
+    this.viewVelYaw += cfg.viewPunchYaw * DEG * k * randRange(-1.3, 1.3);
+    this.viewVelRoll += cfg.viewPunchRoll * DEG * k * randRange(-1.2, 1.2);
   }
 
   update(dt: number): void {
     const cfg = this.cfg;
     this.sinceLastShot += dt;
+    this.tremorTime += dt;
 
-    // Пауза в стрельбе -> прицел плавно возвращается, счётчик паттерна сбрасывается.
+    // Ствол остывает только тогда, когда из него не стреляют.
+    const firing = this.sinceLastShot < 0.25;
+    if (!firing) this.barrelHeat = Math.max(0, this.barrelHeat - cfg.recoilHeatCool * dt);
+
+    // Пауза в стрельбе -> прицел возвращается. Вертикаль уходит в ноль, а
+    // горизонталь — только к залипшему уводу, и то медленнее.
     if (this.sinceLastShot > cfg.recoilRecoveryDelay) {
       const k = cfg.recoilRecoverySpeed;
       this.targetPitch = damp(this.targetPitch, 0, k, dt);
-      this.targetYaw = damp(this.targetYaw, 0, k, dt);
+      this.targetYaw = damp(this.targetYaw, this.yawBias, k * cfg.recoilYawRecoveryMul, dt);
+      this.yawBias = damp(this.yawBias, 0, cfg.recoilYawStickDecay, dt);
     }
     if (this.sinceLastShot > 0.32 && this.shotIndex > 0) {
+      // Новая очередь — новая фаза дрейфа и новое смещение внутри паттерна.
       this.shotIndex = 0;
-      // Новая очередь — новая фаза дрейфа.
       this.driftSeed = Math.random() * 100;
+      this.patternPhase = randRange(0, cfg.recoilPatternSmear);
     }
 
-    // Быстрый, но не мгновенный подъём — именно он читается как "подброс".
-    this.pitch = damp(this.pitch, this.targetPitch, cfg.recoilAttack, dt);
-    this.yaw = damp(this.yaw, this.targetYaw, cfg.recoilAttack, dt);
+    this.updateAimSpring(dt);
+
+    // Тремор: чем горячее ствол и длиннее очередь, тем сильнее «плывёт» точка
+    // попадания. Именно он не даёт держать зажим бесконечно долго.
+    const burst = Math.min(1, this.shotIndex / 12);
+    const amp = cfg.recoilTremor * DEG * (0.25 + 0.75 * this.barrelHeat) * (0.35 + 0.65 * burst);
+    const t = this.tremorTime;
+    const tremorPitch = (Math.sin(t * 13.7 + this.tremorA) + 0.6 * Math.sin(t * 23.3 + this.tremorB)) * amp;
+    const tremorYaw =
+      (Math.sin(t * 11.1 + this.tremorC) + 0.6 * Math.sin(t * 19.7 + this.tremorD)) * amp * 1.3;
+
+    this.pitch = this.springPitch + tremorPitch;
+    this.yaw = this.springYaw + tremorYaw;
 
     this.updateViewPunch(dt);
+  }
+
+  /**
+   * Недодемпфированная пружина прицела: `recoilAttack` — собственная частота,
+   * `recoilSpringDamping` — коэффициент затухания (<1 даёт перелёт). Жёсткая
+   * пружина на большом кадре расходится, поэтому шаг дробим.
+   */
+  private updateAimSpring(dt: number): void {
+    const cfg = this.cfg;
+    const w = cfg.recoilAttack;
+    const k = w * w;
+    const c = 2 * cfg.recoilSpringDamping * w;
+
+    const steps = Math.min(8, Math.max(1, Math.ceil(dt * w * 4)));
+    const h = dt / steps;
+    for (let i = 0; i < steps; i++) {
+      this.velPitch += ((this.targetPitch - this.springPitch) * k - this.velPitch * c) * h;
+      this.springPitch += this.velPitch * h;
+      this.velYaw += ((this.targetYaw - this.springYaw) * k - this.velYaw * c) * h;
+      this.springYaw += this.velYaw * h;
+    }
   }
 
   private updateViewPunch(dt: number): void {
@@ -125,8 +269,17 @@ export class RecoilController {
     this.yaw = 0;
     this.targetPitch = 0;
     this.targetYaw = 0;
+    this.springPitch = 0;
+    this.springYaw = 0;
+    this.velPitch = 0;
+    this.velYaw = 0;
     this.shotIndex = 0;
     this.sinceLastShot = 10;
+    this.barrelHeat = 0;
+    this.yawBias = 0;
+    this.patternPhase = 0;
+    this.lastKick.strength = 1;
+    this.lastKick.hitch = false;
     this.view.pitch = 0;
     this.view.yaw = 0;
     this.view.roll = 0;

@@ -1,6 +1,9 @@
-import { Color3, Mesh, MeshBuilder, Quaternion, Scene, StandardMaterial, TransformNode, Vector3 } from "@babylonjs/core";
+import { Color3, Matrix, Mesh, MeshBuilder, Quaternion, Scene, StandardMaterial, TransformNode, Vector3 } from "@babylonjs/core";
 import { clamp, clamp01, damp, lerp, randRange } from "../core/MathUtil";
 import { RB, RB_COUNT, Ragdoll } from "./Ragdoll";
+import { humanContour, uniformTexture } from "./HumanGeometry";
+import { SkinnedBody, type JointMap } from "./SkinnedBody";
+import type { AssetContainer } from "@babylonjs/core";
 
 /** Зона поражения части тела. */
 export type BodyZone = "head" | "chest" | "limb";
@@ -90,6 +93,9 @@ export class Character {
   private headMesh: Mesh | null = null;
   private readonly handMesh: [Mesh | null, Mesh | null] = [null, null];
 
+  /** Готовая модель поверх процедурного скелета; без неё видно примитивы. */
+  private skin: SkinnedBody | null = null;
+
   private readonly ragdoll = new Ragdoll();
   private readonly ragdollPoints: Vector3[] = [];
   /** Исходные родители и локальные позиции — для возврата скелета в иерархию. */
@@ -116,114 +122,167 @@ export class Character {
 
     this.root = new TransformNode(`${prefix}-root`, scene);
 
-    // ---------------------------------------------------------------- корпус
+    const clothDetail = this.material(`${prefix}-cloth-detail`, palette.uniform.scale(0.72), 0.025, 12);
+    const eyeWhite = this.material(`${prefix}-eyes`, new Color3(0.55, 0.53, 0.47), 0.2, 48);
+    const faceDetail = this.material(`${prefix}-face-detail`, palette.skin.scale(0.48), 0.025, 12);
+    uniform.diffuseTexture = uniformTexture(scene, `${prefix}-fabric`, true);
+    clothDetail.diffuseTexture = uniform.diffuseTexture;
+    gear.diffuseTexture = uniformTexture(scene, `${prefix}-nylon`, false);
+
+    const oval = (name: string, parent: TransformNode, mat: StandardMaterial,
+      x: number, y: number, z: number, w: number, h: number, d: number, zone: BodyZone = "limb") => {
+      const mesh = MeshBuilder.CreateSphere(name, { diameter: 1, segments: 16 }, scene);
+      mesh.scaling.set(w, h, d);
+      return this.part(name, mesh, mat, parent, x, y, z, zone);
+    };
+    const contour = (name: string, parent: TransformNode, mat: StandardMaterial,
+      rings: Array<[number, number, number, number?]>, zone: BodyZone = "limb") =>
+      this.part(name, humanContour(scene, name, rings), mat, parent, 0, 0, 0, zone);
+
     this.fallPivot = new TransformNode(`${prefix}-fall`, scene);
     this.fallPivot.parent = this.root;
     this.hips = this.joint("hips", this.fallPivot, 0, SEG.hipHeight, 0);
-    this.part("pelvis", MeshBuilder.CreateBox("pelvis", { width: 0.32, height: 0.2, depth: 0.22 }, scene), uniform, this.hips, 0, -0.02, 0, "chest");
-
+    contour("pelvis", this.hips, uniform, [
+      [-0.15, 0.12, 0.09], [-0.08, 0.17, 0.115], [0.015, 0.16, 0.115], [0.09, 0.145, 0.10],
+    ], "chest");
     this.spine = this.joint("spine", this.hips, 0, 0.08, 0);
-    this.part("torso", MeshBuilder.CreateBox("torso", { width: 0.36, height: 0.3, depth: 0.23 }, scene), uniform, this.spine, 0, 0.09, 0, "chest");
-
+    contour("torso", this.spine, uniform, [
+      [-0.03, 0.145, 0.105], [0.04, 0.15, 0.11], [0.14, 0.165, 0.118], [0.25, 0.185, 0.12],
+    ], "chest");
     this.chest = this.joint("chest", this.spine, 0, SEG.pelvisToChest - 0.08, 0);
-    this.part("chest", MeshBuilder.CreateBox("chest", { width: 0.42, height: 0.28, depth: 0.25 }, scene), uniform, this.chest, 0, 0.12, 0, "chest");
-    // Разгрузка поверх груди — силуэт сразу читается как военный.
-    this.part("rig", MeshBuilder.CreateBox("rig", { width: 0.37, height: 0.24, depth: 0.28 }, scene), gear, this.chest, 0, 0.11, 0.01, "chest");
+    contour("chest", this.chest, uniform, [
+      [-0.055, 0.165, 0.115], [0.05, 0.195, 0.13], [0.15, 0.205, 0.13],
+      [0.215, 0.19, 0.11], [0.26, 0.07, 0.075],
+    ], "chest");
+    contour("rig", this.chest, gear, [
+      [-0.055, 0.16, 0.128], [-0.025, 0.182, 0.142], [0.14, 0.183, 0.145],
+      [0.205, 0.137, 0.132],
+    ], "chest");
+    for (const side of [-1, 1]) {
+      oval("vest-strap", this.chest, clothDetail, side * 0.115, 0.225, 0.035, 0.058, 0.065, 0.235, "chest");
+      oval("belt-pouch", this.hips, gear, side * 0.155, -0.005, 0.025, 0.075, 0.13, 0.14, "chest");
+      for (let i = 0; i < 2; i++) {
+        oval("mag-pouch", this.chest, clothDetail, side * (0.043 + i * 0.072), 0.045, 0.136, 0.069, 0.15, 0.062, "chest");
+        oval("pouch-flap", this.chest, gear, side * (0.043 + i * 0.072), 0.095, 0.164, 0.063, 0.038, 0.018, "chest");
+      }
+    }
+    contour("belt", this.hips, gear, [[0.012, 0.168, 0.122], [0.05, 0.163, 0.119]], "chest");
+    oval("belt-buckle", this.hips, boots, 0, 0.032, 0.122, 0.052, 0.035, 0.018, "chest");
 
     this.neck = this.joint("neck", this.chest, 0, SEG.chestToNeck, 0);
-    this.part("neck", MeshBuilder.CreateCylinder("neck", { diameter: 0.11, height: 0.09, tessellation: 8 }, scene), skin, this.neck, 0, 0.04, 0, "head");
-
+    contour("neck", this.neck, skin, [[-0.025, 0.062, 0.055], [0.04, 0.05, 0.049], [0.095, 0.055, 0.052]], "head");
     this.headNode = this.joint("head", this.neck, 0, SEG.neck, 0);
-    this.headMesh = this.part(
-      "head",
-      MeshBuilder.CreateSphere("head", { diameter: 0.23, segments: 10 }, scene),
-      skin,
-      this.headNode,
-      0,
-      0.09,
-      0,
-      "head"
-    );
-    const helmet = MeshBuilder.CreateSphere("helmet", { diameter: 0.26, segments: 10, slice: 0.62 }, scene);
-    this.part("helmet", helmet, gear, this.headNode, 0, 0.06, -0.005, "head");
+    this.headMesh = oval("head", this.headNode, skin, 0, 0.102, 0, 0.165, 0.225, 0.195, "head");
+    contour("jaw", this.headNode, skin, [
+      [0.005, 0.04, 0.043, 0.025], [0.025, 0.058, 0.066, 0.022],
+      [0.07, 0.073, 0.076, 0.012], [0.105, 0.077, 0.079, 0.008],
+    ], "head");
+    oval("nose", this.headNode, skin, 0, 0.084, 0.099, 0.029, 0.052, 0.042, "head");
+    oval("mouth", this.headNode, faceDetail, 0, 0.045, 0.089, 0.047, 0.008, 0.009, "head");
+    oval("lower-lip", this.headNode, skin, 0, 0.039, 0.088, 0.044, 0.009, 0.012, "head");
+    for (const side of [-1, 1]) {
+      oval("ear", this.headNode, skin, side * 0.083, 0.083, 0, 0.028, 0.057, 0.03, "head");
+      oval("eye-socket", this.headNode, faceDetail, side * 0.033, 0.114, 0.087, 0.036, 0.019, 0.018, "head");
+      oval("eye", this.headNode, eyeWhite, side * 0.033, 0.114, 0.095, 0.027, 0.011, 0.009, "head");
+      oval("iris", this.headNode, gear, side * 0.033, 0.114, 0.1, 0.01, 0.01, 0.005, "head");
+      oval("eyebrow", this.headNode, faceDetail, side * 0.033, 0.13, 0.087, 0.041, 0.008, 0.015, "head");
+      oval("helmet-strap", this.headNode, gear, side * 0.069, 0.037, 0.024, 0.012, 0.091, 0.014, "head");
+    }
+    const helmet = MeshBuilder.CreateSphere("helmet", { diameter: 1, segments: 20, slice: 0.47 }, scene);
+    helmet.scaling.set(0.202, 0.238, 0.235);
+    this.part("helmet", helmet, clothDetail, this.headNode, 0, 0.12, -0.012, "head");
+    const rim = MeshBuilder.CreateTorus("helmet-rim", { diameter: 0.202, thickness: 0.011, tessellation: 28 }, scene);
+    rim.scaling.z = 1.16;
+    this.part("helmet-rim", rim, gear, this.headNode, 0, 0.133, -0.012, "head");
 
-    // ------------------------------------------------------------------ руки
     this.shoulder = [
-      this.joint("shoulder-l", this.chest, -0.22, SEG.chestToNeck - 0.05, 0),
-      this.joint("shoulder-r", this.chest, 0.22, SEG.chestToNeck - 0.05, 0),
+      this.joint("shoulder-l", this.chest, -0.205, SEG.chestToNeck - 0.05, 0),
+      this.joint("shoulder-r", this.chest, 0.205, SEG.chestToNeck - 0.05, 0),
     ];
     this.elbow = [this.joint("elbow-l", this.shoulder[0], 0, -SEG.upperArm, 0), this.joint("elbow-r", this.shoulder[1], 0, -SEG.upperArm, 0)];
-
     for (const side of [0, 1] as const) {
       const s = side === 0 ? "l" : "r";
-      this.part(`upper-arm-${s}`, this.capsule(`upper-arm-${s}`, 0.115, SEG.upperArm), uniform, this.shoulder[side], 0, -SEG.upperArm / 2, 0, "limb");
-      this.part(`lower-arm-${s}`, this.capsule(`lower-arm-${s}`, 0.1, SEG.lowerArm), uniform, this.elbow[side], 0, -SEG.lowerArm / 2, 0, "limb");
-      this.handMesh[side] = this.part(
-        `hand-${s}`,
-        MeshBuilder.CreateBox(`hand-${s}`, { width: 0.085, height: 0.11, depth: 0.07 }, scene),
-        gear,
-        this.elbow[side],
-        0,
-        -SEG.lowerArm - 0.04,
-        0,
-        "limb"
-      );
+      contour(`upper-arm-${s}`, this.shoulder[side], uniform, [
+        [-0.30, 0.049, 0.052], [-0.235, 0.055, 0.058], [-0.12, 0.069, 0.073],
+        [-0.035, 0.072, 0.072], [0.045, 0.037, 0.043],
+      ]);
+      contour(`lower-arm-${s}`, this.elbow[side], uniform, [
+        [-0.275, 0.033, 0.031], [-0.22, 0.037, 0.038], [-0.12, 0.053, 0.057],
+        [-0.03, 0.052, 0.052], [0.018, 0.042, 0.042],
+      ]);
+      oval(`elbow-pad-${s}`, this.elbow[side], gear, 0, -0.025, -0.045, 0.084, 0.10, 0.038);
+      contour(`cuff-${s}`, this.elbow[side], clothDetail, [[-0.266, 0.038, 0.036], [-0.226, 0.041, 0.038]]);
+      this.handMesh[side] = oval(`hand-${s}`, this.elbow[side], gear, 0, -SEG.lowerArm - 0.041, 0, 0.071, 0.10, 0.047);
+      for (let finger = 0; finger < 4; finger++) {
+        oval(`finger-${s}`, this.elbow[side], gear, -0.025 + finger * 0.016, -SEG.lowerArm - 0.086, 0.013, 0.017, 0.058 - Math.abs(finger - 1) * 0.005, 0.026);
+      }
+      oval(`thumb-${s}`, this.elbow[side], gear, (side === 0 ? 1 : -1) * 0.034, -SEG.lowerArm - 0.034, 0.024, 0.027, 0.057, 0.03);
     }
 
-    // ------------------------------------------------------------------ ноги
-    this.thigh = [this.joint("thigh-l", this.hips, -0.1, -0.04, 0), this.joint("thigh-r", this.hips, 0.1, -0.04, 0)];
+    this.thigh = [this.joint("thigh-l", this.hips, -0.095, -0.04, 0), this.joint("thigh-r", this.hips, 0.095, -0.04, 0)];
     this.knee = [this.joint("knee-l", this.thigh[0], 0, -SEG.thigh, 0), this.joint("knee-r", this.thigh[1], 0, -SEG.thigh, 0)];
     this.ankle = [this.joint("ankle-l", this.knee[0], 0, -SEG.shin, 0), this.joint("ankle-r", this.knee[1], 0, -SEG.shin, 0)];
-
     for (const side of [0, 1] as const) {
       const s = side === 0 ? "l" : "r";
-      this.part(`thigh-${s}`, this.capsule(`thigh-${s}`, 0.17, SEG.thigh), uniform, this.thigh[side], 0, -SEG.thigh / 2, 0, "limb");
-      this.part(`shin-${s}`, this.capsule(`shin-${s}`, 0.14, SEG.shin), uniform, this.knee[side], 0, -SEG.shin / 2, 0, "limb");
-      this.part(
-        `boot-${s}`,
-        MeshBuilder.CreateBox(`boot-${s}`, { width: 0.12, height: 0.1, depth: 0.27 }, scene),
-        boots,
-        this.ankle[side],
-        0,
-        0.04,
-        0.05,
-        "limb"
-      );
+      contour(`thigh-${s}`, this.thigh[side], uniform, [
+        [-0.46, 0.061, 0.066], [-0.37, 0.067, 0.076], [-0.23, 0.084, 0.091],
+        [-0.10, 0.093, 0.106], [0.025, 0.077, 0.092],
+      ]);
+      contour(`shin-${s}`, this.knee[side], uniform, [
+        [-0.45, 0.046, 0.048], [-0.32, 0.051, 0.057], [-0.19, 0.072, 0.079, -0.01],
+        [-0.065, 0.068, 0.07], [0.023, 0.06, 0.064],
+      ]);
+      oval(`knee-pad-${s}`, this.knee[side], gear, 0, -0.012, 0.059, 0.115, 0.14, 0.046);
+      oval(`cargo-pocket-${s}`, this.thigh[side], clothDetail, (side === 0 ? -1 : 1) * 0.083, -0.19, 0, 0.037, 0.16, 0.13);
+      contour(`boot-shaft-${s}`, this.ankle[side], boots, [[0.02, 0.06, 0.066], [0.10, 0.057, 0.058], [0.22, 0.057, 0.059]]);
+      oval(`boot-${s}`, this.ankle[side], boots, 0, 0.055, 0.053, 0.127, 0.13, 0.267);
+      oval(`boot-sole-${s}`, this.ankle[side], gear, 0, 0.022, 0.053, 0.135, 0.036, 0.275);
+      for (let i = 0; i < 4; i++) oval("boot-lace", this.ankle[side], clothDetail, 0, 0.103 + i * 0.018, 0.057, 0.072, 0.009, 0.014);
     }
 
-    // ---------------------------------------------------------------- оружие
     if (options.holdWeapon) {
-      // Держатель висит на груди, а не на локте: при креплении к предплечью
-      // ствол разворачивается вместе с ним и смотрит вверх-назад.
-      this.weaponHolder = this.joint("weapon", this.chest, 0.15, 0.11, 0.14);
-      const body = MeshBuilder.CreateBox("nme-weapon", { width: 0.06, height: 0.09, depth: 0.5 }, scene);
-      this.part("weapon-body", body, gear, this.weaponHolder, 0, 0.02, 0.14, "limb");
-      const mag = MeshBuilder.CreateBox("nme-weapon-mag", { width: 0.04, height: 0.16, depth: 0.07 }, scene);
-      this.part("weapon-mag", mag, gear, this.weaponHolder, 0, -0.08, 0.06, "limb");
-      const stock = MeshBuilder.CreateBox("nme-weapon-stock", { width: 0.05, height: 0.08, depth: 0.16 }, scene);
-      this.part("weapon-stock", stock, gear, this.weaponHolder, 0, 0.01, -0.14, "limb");
+      this.weaponHolder = this.joint("weapon", this.chest, 0.13, 0.1, 0.16);
+      const receiver = MeshBuilder.CreateBox("weapon-body", { width: 0.054, height: 0.072, depth: 0.28 }, scene);
+      this.part("weapon-body", receiver, gear, this.weaponHolder, 0, 0.025, 0.16, "limb");
+      const barrel = MeshBuilder.CreateCylinder("weapon-barrel", { diameter: 0.022, height: 0.3, tessellation: 12 }, scene);
+      barrel.rotation.x = Math.PI / 2;
+      this.part("weapon-barrel", barrel, boots, this.weaponHolder, 0, 0.034, 0.43, "limb");
+      oval("weapon-stock", this.weaponHolder, gear, 0, -0.007, -0.075, 0.052, 0.12, 0.24);
+      const magazine = MeshBuilder.CreateBox("weapon-mag", { width: 0.031, height: 0.14, depth: 0.075 }, scene);
+      this.part("weapon-mag", magazine, gear, this.weaponHolder, 0, -0.071, 0.13, "limb");
+      oval("weapon-grip", this.weaponHolder, gear, 0, -0.062, 0.013, 0.04, 0.115, 0.058);
     }
 
+    // Collapse static details sharing a bone/material into one draw call. Keep
+    // the head/palm landmarks separate for the existing ragdoll solver.
+    const groups = new Map<string, Mesh[]>();
+    for (const mesh of this.meshes) {
+      if (mesh === this.headMesh || this.handMesh.includes(mesh)) continue;
+      const key = `${mesh.parent!.uniqueId}:${mesh.material!.uniqueId}:${mesh.metadata.zone}`;
+      const group = groups.get(key) ?? []; group.push(mesh); groups.set(key, group);
+    }
+    for (const group of groups.values()) {
+      if (group.length < 2) continue;
+      const parent = group[0]!.parent as TransformNode, metadata = group[0]!.metadata;
+      const merged = Mesh.MergeMeshes(group, true, true)!;
+      merged.name = group[0]!.name + "-detail";
+      merged.setParent(parent); merged.metadata = metadata; merged.receiveShadows = true;
+      for (const mesh of group) this.meshes.splice(this.meshes.indexOf(mesh), 1);
+      this.meshes.push(merged);
+    }
     for (let i = 0; i < RB_COUNT; i++) this.ragdollPoints.push(new Vector3());
-
-    // В виде от первого лица прячем только то, что реально перекрывает камеру:
-    // голову с шеей и руки (их заменяет вьюмодель оружия). Грудь и разгрузку
-    // оставляем — без них взгляд вниз упирается в плоский срез торса.
-    this.firstPersonHidden.push(...this.meshes.filter((m) => /^(head|helmet|neck)$|-arm-|^hand-/.test(m.name)));
+    this.firstPersonHidden.push(...this.meshes.filter(m =>
+      m.isDescendantOf(this.neck) || this.shoulder.some(node => m.isDescendantOf(node))));
   }
-
   // -------------------------------------------------------------- построение
 
   private material(name: string, color: Color3, specular: number, power: number): StandardMaterial {
     const m = new StandardMaterial(name, this.scene);
     m.diffuseColor = color;
+    m.ambientColor = Color3.White();
     m.specularColor = new Color3(specular, specular, specular);
     m.specularPower = power;
     return m;
-  }
-
-  private capsule(name: string, diameter: number, height: number): Mesh {
-    return MeshBuilder.CreateCapsule(name, { radius: diameter / 2, height, tessellation: 8, subdivisions: 1 }, this.scene);
   }
 
   private joint(name: string, parent: TransformNode, x: number, y: number, z: number): TransformNode {
@@ -252,6 +311,72 @@ export class Character {
     mesh.metadata = { surface: "dummy", zone };
     this.meshes.push(mesh);
     return mesh;
+  }
+
+  /**
+   * Надеть на процедурный скелет готовую модель из GLB. Примитивы остаются
+   * зонами поражения, но больше не рисуются: попадания считаются по ним, а
+   * видно бойца из файла.
+   */
+  attachSkin(asset: AssetContainer, prefix: string): SkinnedBody {
+    const joints: JointMap = {
+      hips: this.hips, spine: this.spine, chest: this.chest, neck: this.neck, head: this.headNode,
+      shoulderL: this.shoulder[0], elbowL: this.elbow[0],
+      shoulderR: this.shoulder[1], elbowR: this.elbow[1],
+      thighL: this.thigh[0], kneeL: this.knee[0], ankleL: this.ankle[0],
+      thighR: this.thigh[1], kneeR: this.knee[1], ankleR: this.ankle[1],
+    };
+    const skin = new SkinnedBody(this.scene, asset, this.root, joints, prefix);
+    this.withTPose(() => skin.bind());
+    this.skin = skin;
+
+    for (const mesh of this.meshes) {
+      mesh.isVisible = false;
+      const meta = (mesh.metadata ?? {}) as Record<string, unknown>;
+      mesh.metadata = { ...meta, hitProxy: true };
+    }
+    return skin;
+  }
+
+  get skinMeshes(): readonly Mesh[] {
+    return this.skin?.meshes ?? [];
+  }
+
+  /**
+   * Временно развести руки в стороны. Модель из GLB привязана в Т-позе, а наш
+   * скелет в покое стоит руки по швам — сравнивать их надо в одной позе, иначе
+   * поправка получится с вывернутыми плечами.
+   */
+  private withTPose(fn: () => void): void {
+    const nodes = [
+      this.hips, this.spine, this.chest, this.neck, this.headNode,
+      ...this.thigh, ...this.knee, ...this.ankle, ...this.shoulder, ...this.elbow,
+    ];
+    const saved = nodes.map(node => ({
+      quat: node.rotationQuaternion?.clone() ?? null,
+      rot: node.rotation.clone(),
+      pos: node.position.clone(),
+    }));
+    const savedRoot = this.fallPivot.rotation.clone();
+
+    for (const node of nodes) {
+      node.rotationQuaternion = null;
+      node.rotation.setAll(0);
+    }
+    this.fallPivot.rotation.setAll(0);
+    this.hips.position.set(0, SEG.hipHeight, 0);
+    this.shoulder[0].rotation.z = -Math.PI / 2;
+    this.shoulder[1].rotation.z = Math.PI / 2;
+
+    fn();
+
+    nodes.forEach((node, i) => {
+      const s = saved[i]!;
+      node.rotationQuaternion = s.quat;
+      node.rotation.copyFrom(s.rot);
+      node.position.copyFrom(s.pos);
+    });
+    this.fallPivot.rotation.copyFrom(savedRoot);
   }
 
   /** Проставить владельца для системы попаданий. */
@@ -367,6 +492,7 @@ export class Character {
       this.ragdoll.groundY = this.groundY;
       this.ragdoll.update(dt);
       this.applyRagdoll();
+      this.skin?.sync();
       return;
     }
 
@@ -375,6 +501,7 @@ export class Character {
 
     if (death > 0) {
       this.animateDeath(dt, death);
+      this.skin?.sync();
       return;
     }
 
@@ -389,6 +516,7 @@ export class Character {
     this.animateLegs(speed, state);
     this.animateSpine(speed, state);
     this.animateArms(speed, state);
+    this.skin?.sync();
   }
 
   /**
@@ -456,10 +584,9 @@ export class Character {
 
       this.weaponHolder.rotation.set(pitch, -0.12, 0);
 
-      this.shoulder[1].rotation.set(-0.55 + pitch * 0.5 + sway * 0.3, -0.25, 0.32);
-      this.elbow[1].rotation.set(-1.35, 0, 0);
-      this.shoulder[0].rotation.set(-0.78 + pitch * 0.5 - sway * 0.3, 0.35, 0.82);
-      this.elbow[0].rotation.set(-0.5, 0, 0);
+      this.weaponHolder.rotation.z = sway * 0.15;
+      this.fitWeaponArm(1, new Vector3(0, -0.055, 0.013));
+      this.fitWeaponArm(0, new Vector3(-0.015, -0.008, 0.28));
       return;
     }
 
@@ -474,6 +601,30 @@ export class Character {
       this.shoulder[side].rotation.z = (side === 0 ? 1 : -1) * (0.12 + this.currentCrouch * 0.1);
       this.elbow[side].rotation.x = -0.25 - Math.max(0, swing) * 0.8 - this.currentCrouch * 0.5 - air;
     }
+  }
+
+  /** Two-bone reach in chest space: palms stay on the weapon while elbows
+   * bend down/outward. Joint lengths remain compatible with the ragdoll. */
+  private fitWeaponArm(side: 0 | 1, grip: Vector3): void {
+    const holder = this.weaponHolder!;
+    const rotation = Quaternion.FromEulerVector(holder.rotation);
+    const target = Vector3.TransformCoordinates(grip, Matrix.Compose(Vector3.One(), rotation, holder.position));
+    const shoulder = this.shoulder[side], elbow = this.elbow[side];
+    const delta = target.subtract(shoulder.position);
+    const upper = SEG.upperArm, lower = SEG.lowerArm + 0.041;
+    const distance = clamp(delta.length(), 0.08, upper + lower - 0.004);
+    const axis = delta.normalize();
+    const pole = new Vector3(side === 0 ? -0.45 : 0.45, -1, -0.15);
+    const bend = pole.subtract(axis.scale(Vector3.Dot(pole, axis))).normalize();
+    const along = (upper * upper - lower * lower + distance * distance) / (2 * distance);
+    const height = Math.sqrt(Math.max(0, upper * upper - along * along));
+    const upperDirection = axis.scale(along).addInPlace(bend.scale(height));
+    const elbowPoint = shoulder.position.add(upperDirection);
+    const q = Quaternion.FromUnitVectorsToRef(new Vector3(0, -1, 0), upperDirection.normalize(), new Quaternion());
+    shoulder.rotationQuaternion = q;
+    const inverse = Matrix.Invert(Matrix.FromQuaternionToRef(q, new Matrix()));
+    const lowerLocal = Vector3.TransformNormal(target.subtract(elbowPoint).normalize(), inverse).normalize();
+    elbow.rotationQuaternion = Quaternion.FromUnitVectorsToRef(new Vector3(0, -1, 0), lowerLocal, new Quaternion());
   }
 
   /**
@@ -549,6 +700,7 @@ export class Character {
     this.fallPivot.position.y = 0;
     this.hips.position.y = SEG.hipHeight;
     for (const node of [...this.thigh, ...this.knee, ...this.ankle, ...this.shoulder, ...this.elbow]) {
+      node.rotationQuaternion = null;
       node.rotation.set(0, 0, 0);
     }
     this.spine.rotation.set(0, 0, 0);
